@@ -81,7 +81,9 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::NewWorkspace {
-                    if self.config.prompt_new_workspace_name {
+                    if self.endpoints.len() > 1 {
+                        self.open_location_workspace();
+                    } else if self.config.prompt_new_workspace_name {
                         self.open_new_workspace_overlay();
                     } else {
                         self.push_endpoint_method(

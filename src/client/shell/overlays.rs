@@ -1,6 +1,9 @@
 use super::*;
 
+mod location_overlay;
 mod settings_overlay;
+pub(in crate::client::shell) use location_overlay::render_locations;
+pub(in crate::client::shell) use settings_overlay::render_settings_overlay;
 mod worktree_overlays;
 
 #[derive(Default)]
@@ -56,6 +59,7 @@ pub(crate) fn render_client_overlay(
         }
     }
     match o {
+        ClientShellOverlay::Locations(dialog) => location_overlay::render_locations(b, dialog, p),
         ClientShellOverlay::Onboarding => render_onboarding_overlay(b, k, p),
         ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, p),
         ClientShellOverlay::ReleaseNotes(v) => {

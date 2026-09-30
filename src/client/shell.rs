@@ -22,6 +22,7 @@ mod graphics;
 mod input;
 mod input_source;
 mod link_hover;
+mod locations;
 mod mobile;
 mod mouse;
 mod notification_policy;

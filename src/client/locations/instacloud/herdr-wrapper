@@ -1,0 +1,7 @@
+#!/bin/sh
+# SSH and the container entrypoint must address exactly the same persistent session.
+export HOME=/data/home XDG_CONFIG_HOME=/data/config XDG_STATE_HOME=/data/state
+export XDG_RUNTIME_DIR=/tmp/herdr-runtime
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+exec /opt/herdr/herdr "$@"

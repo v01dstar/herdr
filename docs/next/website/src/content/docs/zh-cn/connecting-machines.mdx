@@ -15,6 +15,29 @@ Herdr 会请求 SSH 压缩，以减少受限连接上的屏幕更新流量。这
 
 共享连接使用 `ControlPersist 600`，表示空闲 10 分钟，并不表示 MFA 有效期。活动连接可以继续保持，但企业策略、SSH 服务器或网络可能更早终止连接。Windows 本地恢复尚未支持。未受管理的 SSH 连接由你负责认证；单独运行 `ssh` 不会授予 Herdr 批准，除非它使用共享 ControlPath。主机密钥检查不会放宽；未知或已更改的主机密钥仍显示为 **Attention**。
 
+## 在 Settings 中配置 Remote
+
+打开 **Settings → remotes → Add remote → Provider: SSH** 手动添加 SSH 位置，填写显示名称、SSH 地址或别名、固定的 Herdr session 名称，以及远端默认目录。远端应已安装兼容版本的 Herdr，并配置好无需交互的 SSH 认证。**Test connection** 检查 SSH 和运行中的 Herdr session；**Start remote** 启动已安装的 session，不安装或替换远端软件。
+
+选中 Local 或某个 Remote，点击 **Use as default**。保存 Remote 后，**New workspace** 弹窗包含名称、位置和目录。默认位置独立于当前显示的机器；切换位置会重置为该机器的默认目录，留空时由目标服务器选择。一个 workspace 的所有 tab 和 pane 都在同一台机器运行，一个远端 session 可以包含多个 workspace。
+
+创建在后台执行。提交后关闭弹窗不会撤销已接受的创建；超时可能意味着结果未知，应先检查目标机器的 workspace 列表再重试。Herdr 不会自动重复发送创建请求。
+
+### Instacloud demo
+
+选择 **Add remote → Provider: Instacloud**。Herdr 通过本机 `insta` CLI 自动加载项目和 compute 列表。先用 `insta login` 登录；SSH 需要浏览器/账号登录，不支持 API token 登录。唯一的 `herdr-remote` 项目会被默认选中，否则使用当前链接的项目或让你从列表选择，并使用项目的默认 branch。
+
+Compute 保持 **Create new**，点击 **Create and connect**。Herdr 自动生成名称，创建一台 always-on compute 和挂载到 `/data` 的 10 GiB 持久卷，部署 Herdr 环境，通过 `insta compute ssh --setup` 配置 SSH，连接固定的 `herdr-remote` session。CLI 管理 SSH 密钥、证书和本机 SSH 配置。使用默认的受管 SSH 时，Herdr 为 `.insta` 别名建立新的连接，避免停机恢复后复用仍指向旧 runtime 的网关连接。云资源用量计入所选项目。项目目录为 `/data/workspace`；HOME、Herdr 配置和保存的 session 也位于持久卷。可以在远端 shell 中另行安装和登录 agent CLI。
+
+界面显示后台配置进度，关闭弹窗不会撤销已接受的操作。重新进入 Settings → remotes 可查看正在执行的配置；失败后进入 Add remote，在 Compute 中选择 **Resume**，继续配置同一台机器。操作记录和原始部署文件保存在 `client/instacloud/`。已有 compute 只在通过 Herdr 环境检查后接入，不会替换其镜像。**Provider: SSH** 保留手动添加方式，编辑手动 SSH profile 时仍可设置高级 Cloud 绑定。
+
+此 demo 部署 Linux x86_64 Herdr 二进制；其他客户端可通过 `HERDR_INSTACLOUD_BINARY` 指定兼容文件。CLI 调用保留 agent 身份和授权要求；由 agent 启动时，应从具有所选项目有效 Instacloud agent session 的目录运行。认证继续由 CLI 管理。此 demo 使用生产环境；启动 Herdr 时不要传入 staging 的 `INSTA_API_URL` 或 `INSTA_ENV`，以便 SSH 证书续期使用同一环境。自动创建的 profile 保存 service ID，拒绝操作复用旧名称的另一台 compute。创建 workspace、tab 和 pane 复用同一 compute，关闭 workspace 或断开客户端不会停止机器。
+
+**Compute status** 查询服务的实时状态。**Start remote** 等待 compute 就绪后启动指定的 Herdr session。**Stop compute** 需要确认，因为它会停止该 compute 上的**全部 session 和任务**：先禁用绑定同一 compute 的 profiles 的自动连接，尝试关闭其中已知的 Herdr sessions，再停止 compute。未登记的 session 也会被 provider 终止。卷上的文件保留，运行中的进程不会保留；之后只有显式 Start 或 New 才会启动。仅 SSH 的 profile 不提供 compute stop。
+
+共享本地 Herdr state 目录的客户端会串行执行生命周期操作。其他客户端修改连接目标后，需要重新打开弹窗才可操作新目标。移除 profile 只删除本地连接设置，不会删除 compute 或 volume。SSH catalog 保持 generation-one 兼容，目录默认值和 Cloud 绑定单独保存在 `client/locations.json`。
+
+
 ## 连接前的准备
 
 你需要能够通过普通 SSH 访问远程机器。先验证：

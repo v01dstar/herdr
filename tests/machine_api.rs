@@ -22,7 +22,15 @@ case "$last" in
     '/bin/sh -c '*)
         if [ "$TEST_MODE" = offline ]; then echo 'test remote connection failed' >&2; exit 255; fi
         printf 'login banner\n'
-        PATH="$TEST_ROOT/remote bin:/usr/bin:/bin" exec /bin/sh -c "$last" ;;
+        if [ "$TEST_MODE" = gateway ]; then
+            case "$last" in
+                *' </dev/null')
+                    PATH="$TEST_ROOT/remote bin:$TEST_ROOT/.local/bin:/usr/bin:/bin" exec python3 "$TEST_ROOT/gateway.py" "$last" ;;
+            esac
+        fi
+        # Rediscovery must prefer the fixture's replacement installation over a
+        # real Herdr installed on the machine running this test.
+        PATH="$TEST_ROOT/remote bin:$TEST_ROOT/.local/bin:/usr/bin:/bin" exec /bin/sh -c "$last" ;;
     '/bin/sh -s')
         script=$(cat)
         printf 'login banner\nherdr-remote-output-ready:1\n'
@@ -218,6 +226,46 @@ fn success(output: Output) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn instacloud_gateway_keeps_probe_input_open_until_all_output_arrives() {
+    let harness = Harness::new();
+    let catalog = harness.state.join("endpoints.json");
+    let mut profiles: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+    profiles["ssh"][0]["target"] = json!("fixture.insta");
+    fs::write(catalog, serde_json::to_vec(&profiles).unwrap()).unwrap();
+    fs::write(
+        harness.root.join("gateway.py"),
+        r#"
+import os, select, subprocess, sys
+def input_still_open():
+    # A pipe with no data is readable only after its writer closes it.
+    assert not select.select([0], [], [], 0)[0], 'gateway input closed before probe completed'
+input_still_open()
+os.write(1, b'gateway banner\n')
+# The real discovery and --check commands must get remote EOF despite the open
+# local pipe. The existing remote wrapper checks this before returning capability.
+result = subprocess.run(['/bin/sh', '-c', sys.argv[1]], stdout=subprocess.PIPE)
+input_still_open()
+os.write(1, result.stdout)
+sys.exit(result.returncode)
+"#,
+    )
+    .unwrap();
+    let server = harness.serve(json!({}), 0);
+    success(
+        harness
+            .command(&["--machine", "mac", "status", "server", "--json"])
+            .env("TEST_MODE", "gateway")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(server.join().unwrap()["method"], "ping");
+    let args = fs::read_to_string(harness.root.join("ssh-args")).unwrap();
+    assert!(args.contains(" </dev/null"));
+    assert!(!args.lines().any(|line| line == "/bin/sh -s"));
+    harness.assert_local_untouched();
 }
 
 #[test]

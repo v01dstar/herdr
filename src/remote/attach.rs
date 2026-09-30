@@ -119,6 +119,37 @@ pub(crate) fn check_saved_ssh(target: &str, session: &str) -> io::Result<()> {
     }
 }
 
+pub(crate) fn start_saved_ssh(target: &str, session: &str) -> io::Result<()> {
+    super::validate_remote_target(target).map_err(io::Error::other)?;
+    crate::session::validate_name(session).map_err(io::Error::other)?;
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    ssh.session_name = session.to_owned();
+    let remote = find_installed_remote_herdr(&ssh)?;
+    let command = remote.executable.saved_bridge_command(session);
+    let output = ssh.shell_output(&remote.platform, &command)?;
+    if !output.status.success() {
+        return Err(command_failed("remote server start failed", &output));
+    }
+    check_saved_ssh(target, session)
+}
+
+pub(crate) fn stop_saved_ssh(target: &str, session: &str) -> io::Result<()> {
+    super::validate_remote_target(target).map_err(io::Error::other)?;
+    crate::session::validate_name(session).map_err(io::Error::other)?;
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    ssh.session_name = session.to_owned();
+    let remote = find_installed_remote_herdr(&ssh)?;
+    // Unlike the interactive remote setup flow, TUI background jobs must not print.
+    let command = remote
+        .executable
+        .session_command(session, &["server", "stop"]);
+    let output = ssh.shell_output(&remote.platform, &command)?;
+    if !output.status.success() {
+        return Err(command_failed("remote server stop failed", &output));
+    }
+    wait_for_remote_server_shutdown(&ssh, &remote)
+}
+
 pub(crate) struct SavedSshSetup {
     ssh: RemoteSsh,
     remote_herdr: RemoteHerdr,
@@ -838,6 +869,9 @@ impl RemoteSsh {
 
     fn sh_output(&self, script: &str) -> io::Result<Output> {
         let script = posix_remote_output_command(script);
+        if self.target.ends_with(".insta") {
+            return self.gateway_probe_output(&script);
+        }
         let mut child = self
             .command()
             .arg("/bin/sh -s")
@@ -867,6 +901,9 @@ impl RemoteSsh {
     }
 
     fn framed_user_shell_output(&self, remote_command: &str) -> io::Result<Output> {
+        if self.target.ends_with(".insta") {
+            return self.gateway_probe_output(remote_command);
+        }
         let mut command = self.command();
         command
             // Windows OpenSSH can still read the console with stdin redirected to NUL.
@@ -880,6 +917,23 @@ impl RemoteSsh {
         } else {
             output_with_forwarded_stderr(command.spawn()?, None)
         }?;
+        normalize_remote_output(output)
+    }
+
+    fn gateway_probe_output(&self, script: &str) -> io::Result<Output> {
+        // InstaCloud's gateway currently truncates later stdout chunks after client
+        // stdin EOF. Keep the local pipe open until remote exit, while giving the
+        // remote command /dev/null so probes cannot wait for interactive input.
+        // Duplex client/API bridges already retain their stdin and need no change.
+        let mut child = self
+            .command()
+            .arg(format!("/bin/sh -c {} </dev/null", shell_quote(script)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let _input_lifetime = child.stdin.take();
+        let output = wait_with_output_timeout(child, NONINTERACTIVE_SSH_COMMAND_TIMEOUT)?;
         normalize_remote_output(output)
     }
 
@@ -2929,7 +2983,8 @@ fn ssh_user_config_include(path: Option<&Path>) -> Option<String> {
 /// OpenSSH's first-value-wins behavior preserves explicit user keepalives.
 fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
     let paths = crate::platform::remote_ssh_config_paths();
-    let control_path = if paths.multiplexing {
+    let instacloud_gateway = target.ends_with(".insta");
+    let control_path = if paths.multiplexing && !instacloud_gateway {
         Some(crate::platform::shared_ssh_control_path(
             &crate::config::config_path(),
             target,
@@ -2941,6 +2996,12 @@ fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
     let dir = crate::platform::create_remote_ssh_config_dir(SSH_CONTROL_SOCKET_NAME)?;
     let path = dir.join("config");
     let mut contents = String::new();
+    if instacloud_gateway {
+        // The gateway pins an authenticated transport to its original runtime.
+        // After compute Stop/Start that transport can still be alive but point to
+        // a deleted runtime. Fresh connections also bypass the CLI's own master.
+        contents.push_str("Host *\n  ControlMaster no\n  ControlPath none\n");
+    }
     if let Some(include) = ssh_user_config_include(paths.user_config.as_deref()) {
         contents.push_str(&format!("Include {include}\n"));
     }
@@ -4192,6 +4253,19 @@ mod tests {
                 "{} --session agents server live-handoff",
                 herdr.executable.display()
             )));
+    }
+
+    #[test]
+    fn instacloud_config_never_reuses_a_transport_pinned_to_an_old_runtime() {
+        let config = write_managed_ssh_config("fixture.insta").unwrap();
+        assert!(config.options.control_path.is_none());
+        let contents = std::fs::read_to_string(&config.options.config_path).unwrap();
+        assert!(contents.starts_with("Host *\n  ControlMaster no\n  ControlPath none\n"));
+        let mut command = Command::new("ssh");
+        apply_managed_ssh_options(&mut command, Some(&config.options));
+        assert!(!command
+            .get_args()
+            .any(|arg| arg == "-S" || arg == "ControlMaster=auto"));
     }
 
     #[test]

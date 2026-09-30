@@ -144,7 +144,36 @@ impl ClientShellState {
                 &self.config.palette,
             );
         }
-        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
+        let rendered = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Locations(dialog)) => {
+                render::render_locations(&mut buffer, dialog, &self.config.palette)
+            }
+            Some(ClientShellOverlay::Settings(settings)) => {
+                render::render_settings_overlay(&mut buffer, settings, false, &self.config.palette)
+            }
+            Some(ClientShellOverlay::GlobalMenu(menu)) => {
+                self.snapshot.as_deref().and_then(|snapshot| {
+                    render::render_global_menu(
+                        &mut buffer,
+                        self.hits.global_launcher,
+                        menu,
+                        snapshot,
+                        &self.config.palette,
+                    )
+                })
+            }
+            _ => None,
+        };
+        let cursor = rendered.and_then(|rendered| {
+            self.hits.overlay_primary = rendered.primary;
+            self.hits.overlay_cancel = rendered.cancel;
+            self.hits.settings_popup = rendered.settings_popup;
+            self.hits.settings_tabs = rendered.settings_tabs;
+            self.hits.settings_choices = rendered.settings_choices;
+            self.hits.global_menu_rows = rendered.menu_rows;
+            rendered.cursor
+        });
+        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &[])
     }
 
     pub(crate) fn compose(

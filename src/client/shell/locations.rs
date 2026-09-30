@@ -1,0 +1,1052 @@
+use super::*;
+use crate::client::endpoint::{EndpointCatalog, ProfileId};
+use crate::client::locations::{
+    self as backend, CloudOperation, CloudTarget, LocationPreferences, RemoteOptions,
+};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+pub(super) mod add;
+
+#[derive(Debug)]
+pub(super) enum LocationDialogKind {
+    Manage,
+    Add(Box<add::AddRemoteForm>),
+    Edit(Option<ProfileId>),
+    New,
+    Stop,
+}
+
+#[derive(Debug)]
+pub(super) struct LocationDialog {
+    pub kind: LocationDialogKind,
+    pub fields: Vec<TextEditor>,
+    pub selected: usize,
+    pub location: usize,
+    pub location_missing: bool,
+    pub profiles: Vec<SavedSshEndpoint>,
+    pub prefs: LocationPreferences,
+    pub message: String,
+    pub busy: bool,
+}
+
+impl LocationDialog {
+    pub fn title(&self) -> &str {
+        match self.kind {
+            LocationDialogKind::Manage => "remotes",
+            LocationDialogKind::Add(_) => "add remote",
+            LocationDialogKind::Edit(_) => "remote settings",
+            LocationDialogKind::New => "new workspace",
+            LocationDialogKind::Stop => "stop compute",
+        }
+    }
+    pub fn labels(&self) -> &[&str] {
+        match self.kind {
+            LocationDialogKind::Add(_) => &["Provider", "Project", "Compute"],
+            LocationDialogKind::Manage => &[
+                "Location",
+                "Add remote",
+                "Edit remote",
+                "Test connection",
+                "Use as default",
+                "Compute status",
+                "Start remote",
+                "Stop compute…",
+                "Remove profile",
+            ],
+            LocationDialogKind::Edit(_) => &[
+                "Name",
+                "SSH target",
+                "Herdr session",
+                "Default directory",
+                "Cloud project ID",
+                "Cloud branch",
+                "Compute name",
+            ],
+            LocationDialogKind::New => &["Name", "Location", "Directory"],
+            LocationDialogKind::Stop => &[],
+        }
+    }
+    pub fn profile(&self) -> Option<&SavedSshEndpoint> {
+        self.location
+            .checked_sub(1)
+            .and_then(|i| self.profiles.get(i))
+    }
+
+    fn replace_profiles(&mut self, profiles: Vec<SavedSshEndpoint>) {
+        let selected = self.profile().map(|p| p.id.clone());
+        self.location_missing = selected
+            .as_ref()
+            .is_some_and(|id| !profiles.iter().any(|p| &p.id == id))
+            && matches!(self.kind, LocationDialogKind::New);
+        self.location = selected
+            .and_then(|id| profiles.iter().position(|p| p.id == id))
+            .map_or(0, |i| i + 1);
+        self.profiles = profiles;
+    }
+    pub fn location_label(&self) -> String {
+        if self.location_missing {
+            return "removed — choose a location".into();
+        }
+        self.profile()
+            .map(|p| {
+                format!(
+                    "{}{}",
+                    p.label,
+                    if p.enabled {
+                        ""
+                    } else {
+                        " (stopped / disabled)"
+                    }
+                )
+            })
+            .unwrap_or_else(|| "Local".into())
+    }
+    pub fn choice_field(&self, index: usize) -> bool {
+        matches!(self.kind, LocationDialogKind::Manage) && index == 0
+            || matches!(self.kind, LocationDialogKind::New) && index == 1
+    }
+    pub fn cycle_location(&mut self, delta: isize) {
+        self.location_missing = false;
+        self.location =
+            (self.location as isize + delta).rem_euclid(self.profiles.len() as isize + 1) as usize;
+        if matches!(self.kind, LocationDialogKind::New) {
+            let cwd = self
+                .profile()
+                .and_then(|p| self.prefs.remotes.get(&p.id))
+                .map(|o| o.cwd.as_str())
+                .unwrap_or("");
+            self.fields[2] = TextEditor::new(cwd, true);
+        }
+    }
+    pub fn editor_mut(&mut self) -> Option<&mut TextEditor> {
+        if self.busy
+            || self.choice_field(self.selected)
+            || matches!(
+                self.kind,
+                LocationDialogKind::Manage | LocationDialogKind::Stop | LocationDialogKind::Add(_)
+            )
+        {
+            return None;
+        }
+        self.fields.get_mut(self.selected)
+    }
+}
+
+#[derive(Debug)]
+enum JobResult {
+    Message(String),
+    Ready(NewLocationWorkspace),
+    Created {
+        endpoint: ClientEndpointId,
+        workspace: String,
+        profile: Option<SavedSshEndpoint>,
+        stamp: LocationStamp,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocationStamp {
+    generation: Option<u64>,
+    boot_id: String,
+}
+
+#[derive(Debug)]
+struct NewLocationWorkspace {
+    profile: Option<SavedSshEndpoint>,
+    options: RemoteOptions,
+    cwd: String,
+    label: String,
+}
+
+impl NewLocationWorkspace {
+    fn endpoint(&self) -> ClientEndpointId {
+        self.profile
+            .as_ref()
+            .map(|p| ClientEndpointId::Ssh(p.id.clone()))
+            .unwrap_or(ClientEndpointId::Local)
+    }
+}
+
+#[derive(Debug)]
+struct CreatedLocationWorkspace {
+    epoch: u64,
+    endpoint: ClientEndpointId,
+    workspace: String,
+    profile: Option<SavedSshEndpoint>,
+    stamp: LocationStamp,
+    deadline: Instant,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct LocationController {
+    add: add::AddRemoteController,
+    epoch: u64,
+    job: Option<(u64, mpsc::Receiver<Result<JobResult, String>>)>,
+    prepared: Option<(u64, NewLocationWorkspace, Instant)>,
+    created: Option<CreatedLocationWorkspace>,
+}
+
+impl ClientShellState {
+    fn location_dialog(&mut self, kind: LocationDialogKind) -> Result<LocationDialog, String> {
+        let catalog = EndpointCatalog::load()?;
+        let prefs = LocationPreferences::load()?;
+        let location = prefs.default_index(&catalog.ssh);
+        Ok(LocationDialog {
+            kind,
+            fields: Vec::new(),
+            selected: 0,
+            location,
+            location_missing: false,
+            profiles: catalog.ssh,
+            prefs,
+            message: String::new(),
+            busy: false,
+        })
+    }
+
+    pub(super) fn open_locations(&mut self) {
+        if self.locations.add.running() {
+            self.open_add_remote();
+            return;
+        }
+        if self.locations.job.is_some() {
+            self.set_endpoint_error("A remote operation is still running");
+            return;
+        }
+        self.locations.epoch = self.locations.epoch.wrapping_add(1);
+        match self.location_dialog(LocationDialogKind::Manage) {
+            Ok(mut dialog) => {
+                dialog.message =
+                    "Choose a location with ←/→. Removing a profile keeps its compute and data."
+                        .into();
+                self.overlay = Some(ClientShellOverlay::Locations(dialog));
+            }
+            Err(error) => self.set_endpoint_error(error),
+        }
+    }
+
+    pub(super) fn open_location_workspace(&mut self) {
+        if self.locations.job.is_some() {
+            self.set_endpoint_error("A remote operation is still running");
+            return;
+        }
+        self.locations.epoch = self.locations.epoch.wrapping_add(1);
+        match self.location_dialog(LocationDialogKind::New) {
+            Ok(mut dialog) => {
+                dialog.fields = vec![
+                    TextEditor::new("", false),
+                    TextEditor::default(),
+                    TextEditor::default(),
+                ];
+                dialog.cycle_location(0);
+                dialog.message = "All tabs and panes in this workspace run at this location. Empty directory uses its server default.".into();
+                self.overlay = Some(ClientShellOverlay::Locations(dialog));
+            }
+            Err(error) => self.set_endpoint_error(error),
+        }
+    }
+
+    fn location_job(&mut self, job: impl FnOnce() -> Result<JobResult, String> + Send + 'static) {
+        if self.locations.job.is_some() {
+            return;
+        }
+        let (send, receive) = mpsc::channel();
+        self.locations.job = Some((self.locations.epoch, receive));
+        if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+            dialog.busy = true;
+            dialog.message =
+                "Working… Esc closes this dialog; an accepted operation continues.".into();
+        }
+        std::thread::spawn(move || {
+            let _ = send.send(job());
+        });
+    }
+
+    fn edit_location(&mut self, id: Option<ProfileId>) {
+        let result = (|| {
+            let mut dialog = self.location_dialog(LocationDialogKind::Edit(id.clone()))?;
+            let profile = id
+                .as_ref()
+                .and_then(|id| dialog.profiles.iter().find(|p| &p.id == id));
+            let options = profile
+                .and_then(|p| dialog.prefs.remotes.get(&p.id))
+                .cloned()
+                .unwrap_or_default();
+            let cloud = options.cloud.unwrap_or(CloudTarget {
+                project: String::new(),
+                branch: "main".into(),
+                service: String::new(),
+                service_id: None,
+            });
+            dialog.fields = [
+                profile.map_or("", |p| p.label.as_str()),
+                profile.map_or("", |p| p.target.as_str()),
+                profile.map_or("herdr-remote", |p| p.session.as_str()),
+                &options.cwd,
+                &cloud.project,
+                &cloud.branch,
+                &cloud.service,
+            ]
+            .iter()
+            .map(|value| TextEditor::new(value, true))
+            .collect();
+            dialog.message = "Use an existing SSH alias. Cloud binding is optional; leave project and compute empty for SSH only.".into();
+            Ok::<_, String>(dialog)
+        })();
+        match result {
+            Ok(dialog) => self.overlay = Some(ClientShellOverlay::Locations(dialog)),
+            Err(error) => self.set_endpoint_error(error),
+        }
+    }
+
+    fn save_location(&mut self) -> Result<(), String> {
+        let _guard = backend::operation_lock()?;
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
+            return Ok(());
+        };
+        let LocationDialogKind::Edit(id) = &dialog.kind else {
+            return Ok(());
+        };
+        if let Some(id) = id {
+            let old = dialog
+                .profiles
+                .iter()
+                .find(|p| &p.id == id)
+                .ok_or("Remote was removed")?;
+            backend::validate_binding(
+                old,
+                dialog.prefs.remotes.get(id).and_then(|o| o.cloud.as_ref()),
+            )?;
+        }
+        let values = dialog
+            .fields
+            .iter()
+            .map(|f| f.trim().to_owned())
+            .collect::<Vec<_>>();
+        let mut profile = SavedSshEndpoint::new(&values[0], &values[1], &values[2])?;
+        let options = RemoteOptions {
+            cwd: values[3].clone(),
+            cloud: if values[4].is_empty() && values[6].is_empty() {
+                None
+            } else {
+                Some(CloudTarget {
+                    project: values[4].clone(),
+                    branch: values[5].clone(),
+                    service: values[6].clone(),
+                    service_id: None,
+                })
+            },
+        };
+        let mut options = options;
+        if let Some(id) = id {
+            if let Some(old) = dialog
+                .prefs
+                .remotes
+                .get(id)
+                .and_then(|o| o.cloud.as_ref())
+                .filter(|c| c.service_id.is_some())
+            {
+                let current = options.cloud.as_mut().ok_or(
+                    "Managed compute binding cannot be removed; remove the profile instead",
+                )?;
+                if current.project != old.project
+                    || current.branch != old.branch
+                    || current.service != old.service
+                {
+                    return Err("Managed compute identity cannot be edited; add the intended compute from Instacloud instead".into());
+                }
+                if dialog
+                    .profiles
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .is_some_and(|p| p.target != profile.target)
+                {
+                    return Err("Instacloud manages this remote's SSH target".into());
+                }
+                current.service_id = old.service_id.clone();
+            }
+        }
+        options.validate()?;
+        let _resource_guard = options
+            .cloud
+            .as_ref()
+            .map(backend::instacloud::provisioning::resource_lock)
+            .transpose()?;
+        let mut catalog = EndpointCatalog::load()?;
+        let mut prefs = LocationPreferences::load()?;
+        if let Some(id) = id {
+            let Some(old) = catalog.ssh.iter_mut().find(|p| &p.id == id) else {
+                return Err("Remote was removed by another client".into());
+            };
+            profile.id = id.clone();
+            profile.enabled = old.enabled;
+            *old = profile.clone();
+        } else {
+            if catalog.ssh.len() >= 64 {
+                return Err("At most 64 remote profiles can be saved".into());
+            }
+            catalog.ssh.push(profile.clone());
+        }
+        prefs.remotes.insert(profile.id, options);
+        // Metadata first: a new endpoint must not appear with another endpoint's defaults.
+        prefs.store()?;
+        catalog.store_profiles()?;
+        self.open_locations();
+        Ok(())
+    }
+
+    pub(super) fn accept_location(&mut self, outcome: &mut ClientShellInput) {
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Locations(LocationDialog {
+                kind: LocationDialogKind::Add(_),
+                ..
+            }))
+        ) {
+            self.accept_add_remote(outcome);
+            return;
+        }
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
+            return;
+        };
+        if dialog.busy {
+            return;
+        }
+        if dialog.location_missing {
+            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                dialog.message = "The selected remote was removed. Choose a location explicitly before creating.".into();
+            }
+            outcome.repaint = true;
+            return;
+        }
+        outcome.repaint = true;
+        let profile = dialog.profile().cloned();
+        let options = profile
+            .as_ref()
+            .and_then(|p| dialog.prefs.remotes.get(&p.id))
+            .cloned()
+            .unwrap_or_default();
+        let result = match &dialog.kind {
+            LocationDialogKind::Add(_) => Ok(()),
+            LocationDialogKind::Edit(_) => self.save_location(),
+            LocationDialogKind::New => {
+                let cwd = dialog.fields[2].trim().to_owned();
+                let label = dialog.fields[0].trim().to_owned();
+                let ready = profile.as_ref().is_none_or(|p| {
+                    p.enabled && self.endpoint_is_online(&ClientEndpointId::Ssh(p.id.clone()))
+                });
+                let intent = NewLocationWorkspace {
+                    profile,
+                    options,
+                    cwd,
+                    label,
+                };
+                if ready {
+                    self.submit_location_workspace(intent);
+                } else {
+                    self.location_job(move || {
+                        if let Some(p) = &intent.profile {
+                            backend::start_remote(p, &intent.options)?;
+                        }
+                        Ok(JobResult::Ready(intent))
+                    });
+                }
+                Ok(())
+            }
+            LocationDialogKind::Stop => {
+                if let Some(profile) = profile {
+                    self.location_job(move || {
+                        backend::stop_remote(&profile, &options).map(JobResult::Message)
+                    });
+                }
+                Ok(())
+            }
+            LocationDialogKind::Manage => {
+                let selected = dialog.selected;
+                match selected {
+                    0 => {
+                        if let Some(ClientShellOverlay::Locations(d)) = self.overlay.as_mut() {
+                            d.cycle_location(1);
+                        }
+                        Ok(())
+                    }
+                    1 => {
+                        self.open_add_remote();
+                        Ok(())
+                    }
+                    4 => {
+                        let result = (|| {
+                            let _guard = backend::operation_lock()?;
+                            if let Some(profile) = &profile {
+                                backend::validate_binding(profile, options.cloud.as_ref())?;
+                            }
+                            let mut prefs = LocationPreferences::load()?;
+                            prefs.default_profile = profile.as_ref().map(|p| p.id.clone());
+                            prefs.store()
+                        })();
+                        if result.is_ok() {
+                            if let Some(ClientShellOverlay::Locations(d)) = self.overlay.as_mut() {
+                                d.message =
+                                    format!("New workspace defaults to {}", d.location_label());
+                            }
+                        }
+                        result
+                    }
+                    _ => {
+                        if let Some(profile) = profile {
+                            self.remote_location_action(selected, profile, options)
+                        } else {
+                            Err("Select a remote location first".into())
+                        }
+                    }
+                }
+            }
+        };
+        if let Err(error) = result {
+            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                dialog.message = error;
+            }
+        }
+    }
+
+    fn remote_location_action(
+        &mut self,
+        action: usize,
+        profile: SavedSshEndpoint,
+        options: RemoteOptions,
+    ) -> Result<(), String> {
+        backend::validate_binding(&profile, options.cloud.as_ref())?;
+        match action {
+            2 => self.edit_location(Some(profile.id)),
+            3 => {
+                if !profile.enabled {
+                    return Err("Remote is disabled. Use Start remote before testing SSH.".into());
+                }
+                self.location_job(move || {
+                    crate::remote::check_saved_ssh(&profile.target, &profile.session)
+                        .map(|()| JobResult::Message("SSH and Herdr session are ready".into()))
+                        .map_err(|error| error.to_string())
+                });
+            }
+            5 => {
+                let Some(cloud) = options.cloud else {
+                    return Err("This remote has no Instacloud binding".into());
+                };
+                self.location_job(move || {
+                    backend::cloud_operation(&cloud, CloudOperation::Status).map(JobResult::Message)
+                });
+            }
+            6 => self.location_job(move || {
+                backend::start_remote(&profile, &options)?;
+                Ok(JobResult::Message(
+                    "Remote is ready; automatic connection enabled".into(),
+                ))
+            }),
+            7 => {
+                if options.cloud.is_none() {
+                    return Err("Stop compute requires an Instacloud binding. Manage SSH-only server lifetime on its host.".into());
+                }
+                backend::validate_binding(&profile, options.cloud.as_ref())?;
+                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.kind = LocationDialogKind::Stop;
+                    dialog.selected = 0;
+                    dialog.message = if let Some(cloud) = options.cloud {
+                        format!("Stop compute {} / {} / {}? All sessions and jobs on this compute will stop. Files on its volume remain; running processes do not survive.", cloud.project, cloud.branch, cloud.service)
+                    } else {
+                        format!("Stop {} / session {}? Its running jobs will stop. Automatic connection will be disabled.", profile.target, profile.session)
+                    };
+                }
+            }
+            8 => {
+                let _guard = backend::operation_lock()?;
+                let _resource_guard = options
+                    .cloud
+                    .as_ref()
+                    .map(backend::instacloud::provisioning::resource_lock)
+                    .transpose()?;
+                backend::validate_binding(&profile, options.cloud.as_ref())?;
+                let mut catalog = EndpointCatalog::load()?;
+                catalog.remove_ssh(&profile.id);
+                catalog.store_profiles()?;
+                let mut prefs = LocationPreferences::load()?;
+                prefs.remotes.remove(&profile.id);
+                if prefs.default_profile.as_ref() == Some(&profile.id) {
+                    prefs.default_profile = None;
+                }
+                prefs.store()?;
+                self.open_locations();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(super) fn close_location(&mut self) {
+        self.locations.epoch = self.locations.epoch.wrapping_add(1);
+        self.locations.created = None;
+        self.locations.prepared = None;
+        self.overlay = None;
+    }
+
+    pub(super) fn route_location_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if self.route_add_remote_key(key, outcome) {
+            return true;
+        }
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
+            return false;
+        };
+        outcome.repaint = true;
+        if key.code == KeyCode::Esc {
+            self.close_location();
+            return true;
+        }
+        if dialog.busy {
+            return true;
+        }
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                dialog.selected = (dialog.selected + 1) % (dialog.labels().len() + 1)
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                dialog.selected =
+                    (dialog.selected + dialog.labels().len()) % (dialog.labels().len() + 1)
+            }
+            KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
+                dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
+            }
+            KeyCode::Enter => self.accept_location(outcome),
+            _ => {
+                if let Some(editor) = dialog.editor_mut() {
+                    editor.handle_key(key);
+                }
+            }
+        }
+        true
+    }
+
+    fn location_stamp(&self, endpoint: &ClientEndpointId) -> Option<LocationStamp> {
+        let endpoint = self
+            .endpoints
+            .iter()
+            .find(|e| &e.endpoint_id == endpoint && e.status == ClientEndpointStatus::Online)?;
+        Some(LocationStamp {
+            generation: endpoint.snapshot_generation,
+            boot_id: endpoint.snapshot.as_ref()?.boot_id.clone(),
+        })
+    }
+
+    fn submit_location_workspace(&mut self, intent: NewLocationWorkspace) {
+        let endpoint = intent.endpoint();
+        let Some(stamp) = self.location_stamp(&endpoint) else {
+            self.locations.prepared = Some((
+                self.locations.epoch,
+                intent,
+                Instant::now() + Duration::from_secs(30),
+            ));
+            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                dialog.busy = true;
+                dialog.message = "Waiting for the destination session to connect…".into();
+            }
+            return;
+        };
+        self.location_job(move || {
+            let workspace = backend::create_workspace(
+                intent.profile.as_ref(),
+                &intent.options,
+                intent.cwd,
+                intent.label,
+            )?;
+            Ok(JobResult::Created {
+                endpoint,
+                workspace,
+                profile: intent.profile,
+                stamp,
+            })
+        });
+    }
+
+    pub(crate) fn tick_locations(&mut self, outcome: &mut ClientShellInput) {
+        self.tick_add_remote(outcome);
+        let received =
+            self.locations
+                .job
+                .as_ref()
+                .and_then(|(epoch, receiver)| match receiver.try_recv() {
+                    Ok(result) => Some((*epoch, result)),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some((*epoch, Err("Remote worker exited unexpectedly".into())))
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                });
+        if let Some((epoch, result)) = received {
+            self.locations.job = None;
+            let current = epoch == self.locations.epoch
+                && matches!(self.overlay, Some(ClientShellOverlay::Locations(_)));
+            let message = match result {
+                Ok(JobResult::Message(message)) => message,
+                Ok(JobResult::Ready(intent)) => {
+                    if current {
+                        self.locations.prepared =
+                            Some((epoch, intent, Instant::now() + Duration::from_secs(30)));
+                    }
+                    "Remote started. Waiting for its session snapshot…".into()
+                }
+                Ok(JobResult::Created {
+                    endpoint,
+                    workspace,
+                    profile,
+                    stamp,
+                }) => {
+                    if current {
+                        self.locations.created = Some(CreatedLocationWorkspace {
+                            epoch,
+                            endpoint,
+                            workspace: workspace.clone(),
+                            profile,
+                            stamp,
+                            deadline: Instant::now() + Duration::from_secs(20),
+                        });
+                        format!("Workspace {workspace} created. Waiting for its machine snapshot…")
+                    } else {
+                        format!("Workspace {workspace} created on its selected machine.")
+                    }
+                }
+                Err(error) => error,
+            };
+            if current {
+                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.busy =
+                        self.locations.created.is_some() || self.locations.prepared.is_some();
+                    dialog.message = message;
+                    if let Ok(profiles) = EndpointCatalog::load_profiles() {
+                        dialog.replace_profiles(profiles);
+                    }
+                }
+            } else {
+                self.set_endpoint_error(message);
+            }
+            outcome.repaint = true;
+        }
+        let owns_new_dialog = matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Locations(LocationDialog {
+                kind: LocationDialogKind::New,
+                ..
+            }))
+        );
+        if let Some((epoch, intent, deadline)) = self.locations.prepared.take() {
+            if epoch != self.locations.epoch || !owns_new_dialog || Instant::now() > deadline {
+                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.busy = false;
+                    dialog.message =
+                        "Remote connection was cancelled or timed out; no workspace was created."
+                            .into();
+                }
+                outcome.repaint = true;
+            } else if self.location_stamp(&intent.endpoint()).is_some() {
+                self.submit_location_workspace(intent);
+                outcome.repaint = true;
+            } else {
+                self.locations.prepared = Some((epoch, intent, deadline));
+            }
+        }
+        if let Some(created) = self.locations.created.as_ref() {
+            let stamp = self.location_stamp(&created.endpoint);
+            let stale = stamp.as_ref().is_some_and(|stamp| stamp != &created.stamp);
+            let visible = stamp.as_ref() == Some(&created.stamp)
+                && self
+                    .endpoints
+                    .iter()
+                    .find(|e| e.endpoint_id == created.endpoint)
+                    .and_then(|e| e.snapshot.as_deref())
+                    .is_some_and(|s| {
+                        s.workspaces
+                            .iter()
+                            .any(|w| w.workspace_id == created.workspace)
+                    });
+            if created.epoch != self.locations.epoch
+                || !owns_new_dialog
+                || stale
+                || Instant::now() > created.deadline
+            {
+                self.locations.created = None;
+                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.busy = false;
+                    dialog.message = "Workspace created; automatic focus cancelled because its connection or dialog changed. Select it from the sidebar.".into();
+                }
+                outcome.repaint = true;
+            } else if visible {
+                let unchanged = created.profile.as_ref().is_none_or(|profile| {
+                    EndpointCatalog::load_profiles().is_ok_and(|profiles| {
+                        profiles
+                            .iter()
+                            .any(|p| backend::same_destination(p, profile) && p.enabled)
+                    })
+                });
+                let endpoint = created.endpoint.clone();
+                let workspace = created.workspace.clone();
+                self.locations.created = None;
+                if unchanged {
+                    self.overlay = None;
+                    self.focus_or_activate(
+                        endpoint,
+                        ClientEndpointFocusTarget::Workspace(workspace),
+                        outcome,
+                    );
+                } else if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.busy = false;
+                    dialog.message = "Workspace created, but the remote profile changed. Automatic focus cancelled.".into();
+                }
+                outcome.repaint = true;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn dialog() -> LocationDialog {
+        let profile = SavedSshEndpoint::new("Remote A", "demo-a", "work").unwrap();
+        let mut prefs = LocationPreferences::default();
+        prefs.remotes.insert(
+            profile.id.clone(),
+            RemoteOptions {
+                cwd: "/remote/project".into(),
+                cloud: None,
+            },
+        );
+        LocationDialog {
+            kind: LocationDialogKind::New,
+            fields: vec![
+                TextEditor::default(),
+                TextEditor::default(),
+                TextEditor::new("/local/project", false),
+            ],
+            selected: 1,
+            location: 0,
+            location_missing: false,
+            profiles: vec![profile],
+            prefs,
+            message: String::new(),
+            busy: false,
+        }
+    }
+
+    pub(super) fn shell() -> ClientShellState {
+        ClientShellState::new(ClientShellConfig::from_config(&Config::default()))
+    }
+
+    #[test]
+    fn changing_location_resets_directory_to_that_machines_default() {
+        let mut dialog = dialog();
+        dialog.cycle_location(1);
+        assert_eq!(dialog.fields[2].as_str(), "/remote/project");
+        dialog.fields[2] = TextEditor::new("/remote/edited", false);
+        dialog.cycle_location(-1);
+        assert!(dialog.fields[2].is_empty());
+    }
+
+    #[test]
+    fn mouse_and_keyboard_location_selection_have_the_same_directory_policy() {
+        let mut state = shell();
+        state.overlay = Some(ClientShellOverlay::Locations(dialog()));
+        let mut keyboard = shell();
+        keyboard.overlay = Some(ClientShellOverlay::Locations(dialog()));
+        keyboard.route_location_key(
+            &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
+                KeyCode::Right,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut ClientShellInput::default(),
+        );
+        state.compose(110, 35).unwrap();
+        let (rect, _) = state
+            .hits
+            .settings_choices
+            .iter()
+            .find(|(_, i)| *i == 1)
+            .unwrap();
+        state.handle_mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+        let Some(ClientShellOverlay::Locations(mouse)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        let Some(ClientShellOverlay::Locations(keys)) = keyboard.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert_eq!(mouse.location, keys.location);
+        assert_eq!(mouse.fields[2], keys.fields[2]);
+    }
+
+    #[test]
+    fn cancelled_create_result_never_steals_focus() {
+        let mut state = shell();
+        state.overlay = Some(ClientShellOverlay::Locations(dialog()));
+        let (send, receive) = mpsc::channel();
+        state.locations.job = Some((state.locations.epoch, receive));
+        state.close_location();
+        send.send(Ok(JobResult::Created {
+            endpoint: ClientEndpointId::Local,
+            workspace: "ws_1".into(),
+            profile: None,
+            stamp: LocationStamp {
+                generation: None,
+                boot_id: "boot-1".into(),
+            },
+        }))
+        .unwrap();
+        let mut outcome = ClientShellInput::default();
+        state.tick_locations(&mut outcome);
+        assert!(state.locations.created.is_none());
+        assert!(outcome.actions.is_empty());
+        assert!(state.overlay.is_none());
+    }
+
+    #[test]
+    fn create_focus_waits_for_destination_snapshot_despite_colliding_local_ids() {
+        let mut state = shell();
+        let dialog = dialog();
+        let endpoint = ClientEndpointId::Ssh(dialog.profiles[0].id.clone());
+        state.set_endpoint_catalog(&dialog.profiles);
+        state.set_snapshot(Box::new(super::super::tests::snapshot()));
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        state.locations.created = Some(CreatedLocationWorkspace {
+            epoch: state.locations.epoch,
+            endpoint: endpoint.clone(),
+            workspace: "ws_1".into(),
+            profile: None,
+            stamp: LocationStamp {
+                generation: None,
+                boot_id: "boot-1".into(),
+            },
+            deadline: Instant::now() + Duration::from_secs(5),
+        });
+        let mut outcome = ClientShellInput::default();
+        state.tick_locations(&mut outcome);
+        assert!(outcome.actions.is_empty());
+        state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+        state.set_endpoint_snapshot(&endpoint, Box::new(super::super::tests::snapshot()));
+        state.tick_locations(&mut outcome);
+        assert!(
+            matches!(&outcome.actions[..], [ClientShellAction::ActivateEndpoint {endpoint_id, target: Some(ClientEndpointFocusTarget::Workspace(id))}] if endpoint_id == &endpoint && id == "ws_1")
+        );
+        outcome.actions.clear();
+        state.tick_locations(&mut outcome);
+        assert!(outcome.actions.is_empty());
+    }
+
+    #[test]
+    fn remote_management_survives_disconnection_and_consumes_paste_locally() {
+        let mut state = shell();
+        let mut dialog = dialog();
+        dialog.selected = 0;
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        state.reset_endpoint_projection();
+        assert!(state.modal_paste_target_active());
+        assert!(state.insert_overlay_text("hello\nworld"));
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert_eq!(dialog.fields[0].as_str(), "hello world");
+    }
+
+    #[test]
+    fn refreshing_locations_preserves_identity_when_an_earlier_profile_is_removed() {
+        let mut dialog = dialog();
+        let second = SavedSshEndpoint::new("B", "host-b", "work").unwrap();
+        dialog.profiles.push(second.clone());
+        dialog.location = 2;
+        dialog.replace_profiles(vec![second.clone()]);
+        assert_eq!(dialog.profile().map(|p| &p.id), Some(&second.id));
+        dialog.replace_profiles(Vec::new());
+        assert!(dialog.profile().is_none());
+        assert!(dialog.location_missing);
+        dialog.cycle_location(1);
+        assert!(!dialog.location_missing);
+        assert!(dialog.fields[2].is_empty());
+    }
+
+    #[test]
+    fn popup_takeover_or_server_reboot_cancels_delayed_create_focus() {
+        for popup in [true, false] {
+            let mut state = shell();
+            state.set_snapshot(Box::new(super::super::tests::snapshot()));
+            state.overlay = Some(ClientShellOverlay::Locations(dialog()));
+            state.locations.created = Some(CreatedLocationWorkspace {
+                epoch: state.locations.epoch,
+                endpoint: ClientEndpointId::Local,
+                workspace: "ws_1".into(),
+                profile: None,
+                stamp: LocationStamp {
+                    generation: None,
+                    boot_id: if popup { "boot-1" } else { "prior-boot" }.into(),
+                },
+                deadline: Instant::now() + Duration::from_secs(10),
+            });
+            if popup {
+                state.overlay = None;
+            }
+            let mut outcome = ClientShellInput::default();
+            state.tick_locations(&mut outcome);
+            assert!(outcome.actions.is_empty());
+            assert!(state.locations.created.is_none());
+        }
+    }
+
+    #[test]
+    fn settings_and_remote_entry_are_visible_without_any_pane_surface() {
+        let mut state = shell();
+        state.compose(120, 40).unwrap();
+        let launcher = state.hits.global_launcher;
+        assert!(!launcher.is_empty());
+        state.handle_mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: launcher.x,
+                row: launcher.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(_))
+        ));
+        state.compose(120, 40).unwrap();
+        let (rect, _) = state
+            .hits
+            .settings_tabs
+            .iter()
+            .find(|(_, section)| *section == ClientSettingsSection::Remotes)
+            .unwrap();
+        state.handle_mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Locations(_))
+        ));
+        state.compose(120, 40).unwrap();
+        assert!(!state.hits.settings_choices.is_empty());
+    }
+}

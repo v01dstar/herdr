@@ -331,7 +331,7 @@ fn load_selection_from_path(path: &Path) -> Result<Option<EndpointSelection>, St
     Ok(Some(selection))
 }
 
-pub(super) fn store_private_json(
+pub(crate) fn store_private_json(
     path: &Path,
     content: &[u8],
     description: &str,

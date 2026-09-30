@@ -55,6 +55,10 @@ pub(super) fn global_menu_items(
 
 impl ClientShellState {
     pub(super) fn toggle_global_menu(&mut self) {
+        if self.snapshot.is_none() {
+            self.open_settings_overlay();
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
             self.overlay = None;
         } else {
