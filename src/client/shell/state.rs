@@ -278,6 +278,7 @@ pub(super) enum ClientShellMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientShellOverlayKind {
+    Locations,
     Onboarding,
     ProductAnnouncement,
     ReleaseNotes,
@@ -383,6 +384,7 @@ pub(super) struct ClientGlobalMenuOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientSettingsSection {
+    Remotes,
     Theme,
     Indicators,
     Sound,
@@ -397,10 +399,12 @@ impl ClientSettingsSection {
         Self::Sound,
         Self::Toast,
         Self::Integrations,
+        Self::Remotes,
     ];
 
     pub(super) fn label(self) -> &'static str {
         match self {
+            Self::Remotes => "remotes",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
@@ -580,6 +584,7 @@ pub(super) struct ClientConfirmCloseOverlay {
 
 #[derive(Debug)]
 pub(super) enum ClientShellOverlay {
+    Locations(super::locations::LocationDialog),
     Onboarding,
     ProductAnnouncement(crate::app::state::ProductAnnouncementState),
     ReleaseNotes(crate::app::state::ReleaseNotesState),
@@ -598,6 +603,7 @@ pub(super) enum ClientShellOverlay {
 impl ClientShellOverlay {
     pub(super) fn kind(&self) -> ClientShellOverlayKind {
         match self {
+            Self::Locations(_) => ClientShellOverlayKind::Locations,
             Self::Onboarding => ClientShellOverlayKind::Onboarding,
             Self::ProductAnnouncement(_) => ClientShellOverlayKind::ProductAnnouncement,
             Self::ReleaseNotes(_) => ClientShellOverlayKind::ReleaseNotes,
@@ -846,6 +852,7 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) locations: super::locations::LocationController,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1011,6 +1018,7 @@ impl ClientShellState {
         }
         Self {
             machine_diagnostics: Default::default(),
+            locations: Default::default(),
             config,
             snapshot: None,
             active_snapshot_generation: None,
@@ -1247,10 +1255,14 @@ impl ClientShellState {
         self.endpoint_error_deadline = None;
         self.navigate_workspace_id = None;
         self.pending_workspace_highlight = None;
-        self.overlay = self
-            .config
-            .startup_onboarding
-            .then_some(ClientShellOverlay::Onboarding);
+        // Remote management belongs to the client and can outlive an endpoint
+        // disconnect (including the disconnect caused by Stop remote).
+        if !matches!(self.overlay, Some(ClientShellOverlay::Locations(_))) {
+            self.overlay = self
+                .config
+                .startup_onboarding
+                .then_some(ClientShellOverlay::Onboarding);
+        }
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;

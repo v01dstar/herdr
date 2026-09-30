@@ -15,6 +15,29 @@ Linux と macOS で `remote.manage_ssh_config=true` の場合、マシン追加�
 
 共有接続の `ControlPersist 600` はアイドル状態の 10 分を表すもので、MFA の有効期間ではありません。通信中の接続は維持されますが、企業ポリシー、SSH サーバー、ネットワークによってはそれより早く終了します。ローカル Windows の復旧はまだ対応していません。管理対象外の SSH 接続の認証は利用者の責任です。共有 ControlPath を使わずに `ssh` を実行するだけでは、Herdr の承認にはなりません。ホスト鍵の検証は緩和されず、未知または変更されたホスト鍵は引き続き **Attention** です。
 
+## Settings で Remote を設定する
+
+**Settings → remotes → Add remote → Provider: SSH** で SSH 接続先を手動追加できます。表示名、SSH ターゲットまたはエイリアス、固定の Herdr session 名、必要に応じてリモートの既定ディレクトリを指定します。互換性のある Herdr と非対話 SSH 認証を、接続先にあらかじめ用意してください。**Test connection** は SSH と実行中の session を確認し、**Start remote** はインストール済みの session を起動します。ソフトウェアのインストールや置き換えは行いません。
+
+Local または Remote を選び、**Use as default** で新規作成先を設定します。Remote を保存すると、**New workspace** で名前・場所・ディレクトリを指定するダイアログが開きます。既定の作成先は現在表示しているマシンと独立しています。場所を変えるとディレクトリはそのマシンの設定に戻り、空欄なら接続先サーバーの既定値を使います。1 つの workspace 内の全 tab と pane は同じマシンで動作し、1 つのリモート session に複数の workspace を作成できます。
+
+作成はバックグラウンドで実行されます。送信後にダイアログを閉じても、受理済みの作成は取り消されません。タイムアウト時は結果が不明な場合があるため、再試行の前に接続先を確認してください。Herdr が作成要求を自動で再送することはありません。
+
+### Instacloud demo
+
+**Add remote → Provider: Instacloud** を選ぶと、ローカルの `insta` CLI から project と compute の一覧を取得します。先に `insta login` でログインしてください。SSH にはブラウザー/アカウント認証が必要で、API token 認証は使えません。`herdr-remote` という project が一意なら既定で選択し、そうでなければリンク済み project または一覧から選びます。project の既定 branch を使います。
+
+Compute を **Create new** のまま **Create and connect** を押すと、名前を自動生成して always-on compute と `/data` の 10 GiB 永続 volume を作成し、Herdr 環境をデプロイします。`insta compute ssh --setup` で SSH を設定し、固定の `herdr-remote` session に接続します。CLI が SSH 鍵、証明書、ローカル SSH 設定を管理します。既定の管理対象 SSH では `.insta` ごとに新しい接続を開き、compute 再起動後も古い runtime を参照するゲートウェイ接続を再利用しません。利用量は選択した project に課金されます。作業ディレクトリは `/data/workspace` で、HOME、Herdr 設定、保存済み session も volume 上に置きます。agent CLI のインストールとログインはリモート shell で別途行えます。
+
+設定はバックグラウンドで進み、現在の段階を表示します。ダイアログを閉じても受理済み操作は取り消しません。Settings → remotes を開き直して進捗を確認し、失敗した場合は Add remote の Compute で **Resume** を選ぶと同じ compute の設定を再開できます。操作記録と元のデプロイファイルは `client/instacloud/` に保存されます。既存 compute は準備済み Herdr 環境を確認して接続するだけで、イメージを置き換えません。**Provider: SSH** で手動追加もでき、手動 profile の編集には高度な Cloud binding 設定が残ります。
+
+この demo は Linux x86_64 の Herdr 実行ファイルをデプロイします。他のクライアントでは `HERDR_INSTACLOUD_BINARY` で互換ファイルを指定できます。CLI 呼び出しは agent の識別と権限制御を維持します。agent から起動する場合、選択した project の有効な Instacloud agent session があるディレクトリから実行してください。認証情報は CLI が管理します。この demo は本番環境を使います。SSH 証明書の更新先を揃えるため、Herdr 起動時に staging の `INSTA_API_URL` や `INSTA_ENV` を渡さないでください。管理対象 profile は service ID を保存し、同じ名前を再利用した別の compute への操作を拒否します。workspace、tab、pane は同じ compute を再利用し、workspace を閉じたりクライアントを切断しても compute は停止しません。
+
+**Compute status** は実際の状態を確認します。**Start remote** は compute の準備を待ってから指定 session を起動します。**Stop compute** はその compute 上の**全 session とジョブ**を停止するため、確認を求めます。同じ compute に紐づく profile の自動接続を無効化し、既知の Herdr session の終了を試みてから compute を停止します。未登録の session も provider により終了します。volume のファイルは残りますが、実行中のプロセスは残りません。再起動には明示的な Start または New が必要です。SSH のみの profile に compute stop はありません。
+
+同じローカル Herdr state ディレクトリを使うクライアント間では、操作を直列化します。他のクライアントが接続先を変更した場合、ダイアログを開き直してください。profile の削除はローカル設定だけを削除し、compute や volume を削除しません。SSH catalog は generation-one 互換のまま、ディレクトリ既定値と Cloud binding は `client/locations.json` に保存します。
+
+
 ## 接続前の確認
 
 リモートマシンへの通常の SSH アクセスが必要です。最初に確認してください:

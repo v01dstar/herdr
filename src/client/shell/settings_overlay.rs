@@ -33,7 +33,7 @@ fn draw_choice(
     );
 }
 
-pub(super) fn render_settings_overlay(
+pub(in crate::client::shell) fn render_settings_overlay(
     buffer: &mut Buffer,
     settings: &ClientSettingsOverlay,
     integration_updates_available: bool,
@@ -128,6 +128,7 @@ pub(super) fn render_settings_overlay(
     );
     let mut choice_hits = Vec::new();
     match settings.section {
+        ClientSettingsSection::Remotes => {}
         ClientSettingsSection::Theme => {
             let visible = usize::from(content.height);
             let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));

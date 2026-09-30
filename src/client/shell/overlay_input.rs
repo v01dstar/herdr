@@ -445,6 +445,12 @@ impl ClientShellState {
     }
 
     pub(super) fn insert_overlay_text(&mut self, text: &str) -> bool {
+        if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+            if let Some(editor) = dialog.editor_mut() {
+                editor.insert(text);
+            }
+            return true;
+        }
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
@@ -476,6 +482,10 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         use crossterm::event::KeyModifiers;
+
+        if self.route_location_key(key, outcome) {
+            return;
+        }
 
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if matches!(

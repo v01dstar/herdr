@@ -679,6 +679,44 @@ impl ClientShellState {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
+        if self.route_add_remote_mouse(mouse, outcome) {
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::Locations(_))) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if super::contains(self.hits.overlay_cancel, point) {
+                    self.close_location();
+                } else if super::contains(self.hits.overlay_primary, point) {
+                    self.accept_location(outcome);
+                } else if let Some((_, index)) = self
+                    .hits
+                    .settings_choices
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    let mut accept = false;
+                    if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                        if !dialog.busy {
+                            dialog.selected = index;
+                            if dialog.choice_field(index) {
+                                dialog.cycle_location(1);
+                            } else {
+                                accept = matches!(
+                                    dialog.kind,
+                                    super::locations::LocationDialogKind::Manage
+                                );
+                            }
+                        }
+                    }
+                    if accept {
+                        self.accept_location(outcome);
+                    }
+                }
+                outcome.repaint = true;
+            }
+            return;
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()

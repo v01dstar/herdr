@@ -52,6 +52,7 @@ impl ClientShellState {
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
             ClientSettingsSection::Integrations => 0,
+            ClientSettingsSection::Remotes => 0,
         }
     }
 
@@ -60,6 +61,12 @@ impl ClientShellState {
         section: ClientSettingsSection,
         outcome: &mut ClientShellInput,
     ) {
+        if section == ClientSettingsSection::Remotes {
+            self.cancel_settings_overlay();
+            self.open_locations();
+            outcome.repaint = true;
+            return;
+        }
         let selected = self.selected_index_for_settings_section(section);
         let request_integrations = matches!(section, ClientSettingsSection::Integrations)
             && matches!(
@@ -100,6 +107,7 @@ impl ClientShellState {
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
+                ClientSettingsSection::Remotes => 1,
             },
             _ => 0,
         }
@@ -223,6 +231,10 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+            ClientSettingsSection::Remotes => {
+                self.cancel_settings_overlay();
+                self.open_locations();
+            }
         }
     }
 
