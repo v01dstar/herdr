@@ -49,7 +49,11 @@ pub(super) fn command() -> Command {
                     .help("Set the machine label shown in the sidebar"),
             ),
         )
-        .subcommand(profile_command("remove", "Remove a saved SSH machine"))
+        .subcommand(
+            profile_command("remove", "Remove a saved SSH machine").arg(flag("delete-machine").help(
+                "For a hangar remote, also permanently delete the hangar machine, its disks and snapshots",
+            )),
+        )
         .subcommand(profile_command("enable", "Enable a saved SSH machine"))
         .subcommand(profile_command("disable", "Disable a saved SSH machine"))
 }
