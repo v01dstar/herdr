@@ -36,32 +36,17 @@ undo an accepted creation. A timeout can leave the result unknown: check the
 destination's workspace list before retrying. Herdr never automatically retries
 workspace creation.
 
-### Instacloud demo
+### hangar machines
 
-Choose **Add remote → Provider: Instacloud**. Herdr loads projects and computes from the locally installed `insta` CLI. Sign in with `insta login` first; SSH requires a browser/account login rather than an API-token login. A unique `herdr-remote` project is selected by default, otherwise Herdr uses the linked project or asks you to choose. The project's default branch is used.
+Choose **Add remote → Provider: hangar** to use a machine on a hangar server. Herdr shares the sign-in with the `hangar` CLI (`~/.config/hangar/credentials.json`): if you already ran `hangar login`, the machine list appears right away. Otherwise press **Sign in**; the dialog shows a code and opens GitHub's device page in your browser. The server defaults to `https://152.236.1.51`; set `HANGAR_SERVER` before starting Herdr to add machines from another server. Each saved machine remembers its server.
 
-Leave Compute on **Create new** and click **Create and connect**. Herdr generates the service name, creates one always-on compute with a 10 GiB volume at `/data`, deploys a small Herdr environment, configures SSH through `insta compute ssh --setup`, and connects the fixed `herdr-remote` session. The CLI maintains its SSH keys, certificates, and SSH configuration. With managed SSH enabled (the default), Herdr opens fresh transports for `.insta` aliases because a gateway connection can remain bound to an old runtime after compute restart. Instacloud usage is billed to the selected project. Project files live at `/data/workspace`; HOME, Herdr config, and saved sessions also live on the volume. Agent CLIs and their logins can be set up inside the remote shell separately.
+The **Machine** list shows your machines; stopped ones are marked. Pick one and click **Connect**, or choose **Create new machine**, enter a name, and click **Create and connect**. New machines use the `herdr` template with its default size and a persistent disk. Herdr waits until the machine is ready, starts its `herdr-remote` session, and enables automatic connection. A stopped machine is saved disabled and is not started. From a terminal, `herdr machine add <name-or-id> --hangar` saves an existing machine the same way.
 
-Setup runs in the background and displays its current step. Closing the dialog does not undo accepted operations. Reopen Settings → remotes to watch an active setup, or Add remote and choose **Resume** to recover an incomplete setup on the same compute. Setup records and the original deployment bundle are kept under `client/instacloud/`. Existing computes are connected only after verifying the prepared Herdr environment; their images are never replaced. You can also choose **Provider: SSH** for manual connection settings. Advanced cloud fields remain available when editing a manual SSH profile.
+Herdr reaches hangar machines through the hangar SSH gateway. It keeps its own SSH key and short-lived certificates (4 hours) in its state directory under `client/hangar/ssh/`, and writes the gateway settings only into its temporary SSH configuration; `~/.ssh/config` is not changed. The saved SSH target is the alias `hangar-<machine ID>`. Before each new connection Herdr checks that the machine is running and renews the certificate when less than 15 minutes remain. Connection sharing stays on: the gateway closes live connections when a machine stops, so a reconnect never reuses a connection to an old runtime.
 
-This demo deploys a Linux x86_64 Herdr executable. Other clients can supply one through `HERDR_INSTACLOUD_BINARY`. CLI calls retain agent identity and its authorization requirements: when launched by an agent, run from a directory with a valid Instacloud agent session for the selected project. Credentials remain with the CLI. This demo targets production; launch Herdr without staging `INSTA_API_URL` or `INSTA_ENV` overrides so SSH certificate renewal uses the same environment. New managed profiles also record the service ID and reject a different compute reusing its old name. Creating workspaces, tabs, and panes reuses the compute; closing a workspace or detaching the client keeps it running.
+Nothing in Herdr starts a machine implicitly. Reconnect, **Test connection**, **New workspace**, and `herdr --machine` fail with "use Start remote" when the machine is stopped. **Machine status** shows the machine's state. **Start remote** starts the machine, waits until it is ready, and starts the saved Herdr session. **Stop machine** asks for confirmation because it stops **all sessions and jobs on that machine**. It disables automatic connection for remotes bound to the same machine, attempts to stop their Herdr sessions, and then stops the machine. Files on the persistent disk remain; running processes do not survive a stop. An expired sign-in shows **Sign in to hangar**; a machine you are not allowed to use shows "not allowed on this server" and does not ask you to sign in again.
 
-**Compute status** reads the provider's live state. **Start remote** waits for
-compute readiness before starting the saved Herdr session. **Stop compute** asks
-for confirmation because it stops **all sessions and jobs on that compute**. It
-disables automatic connection for profiles bound to the same compute, attempts
-to stop their known Herdr sessions, and then stops the compute. Unknown sessions
-on that compute are also terminated by the provider. Volume files remain;
-running processes do not survive a stop. A stopped compute stays stopped until
-an explicit Start or New action. SSH-only profiles do not offer compute stop.
-
-Remote lifecycle operations are serialized across clients sharing the local
-Herdr state directory. A profile changed by another client must be reopened
-before an operation can use its new destination. Removing a profile deletes only
-the local connection settings; it does not delete compute or volumes. The SSH
-catalog remains compatible with generation-one clients; directory defaults and
-cloud bindings are stored separately in `client/locations.json`.
-
+Remote setting changes are serialized across clients sharing the local Herdr state directory, and the hangar server serializes machine operations. A profile changed by another client must be reopened before an operation can use its new destination. Removing a profile deletes only the local connection settings; it does not delete the machine or its disk. The SSH catalog remains compatible with generation-one clients; directory defaults and hangar bindings are stored separately in `client/locations.json`. Remotes created by the earlier Instacloud integration are disabled on upgrade; their profiles and default directories are kept so you can remove them.
 
 ## Before you connect
 

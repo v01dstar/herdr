@@ -51,6 +51,7 @@ herdr api schema --output herdr-api.schema.json
 herdr machine list
 herdr machine add workbox
 herdr machine add workbox --label "Build machine"
+herdr machine add my-box --hangar
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
@@ -60,6 +61,8 @@ herdr machine remove <profile-id>
 在交互式终端中，`machine add` 会发现运行中的会话，并在有多个会话运行时让你选择。没有运行中的会话或未安装 Herdr 时使用 `default`；如果查询已安装的二进制文件失败，则需要明确选择。添加 `--remote-session <name>` 可跳过发现。非交互式命令会使用 `default`，除非提供该选项。`machine list` 支持可选的 `--json` 供脚本使用。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。
 
 `machine add` 会检查远程 Herdr 是否具备所需能力，仅在必要时征得批准后安装或更新，并在保存配置前启动指定会话的后台服务器。只要兼容，发行版本不必一致。需要批准安装或重启时，请在交互式终端中运行；设置失败或取消时不会保存配置。替换运行中的服务器需要明确批准，默认回答为 No；停止服务器会结束其窗格进程。`machine add` 不会隐式启用实验性实时交接。
+
+使用 `--hangar` 时，参数为 hangar 机器的名称或 ID。Herdr 使用与 `hangar` CLI 共享的登录信息，通过 hangar 网关并使用自己的短期证书连接；未指定 `--remote-session` 时使用 `herdr-remote` session。已停止的机器以禁用状态保存，不会被启动。
 
 更改会自动应用到已打开的本地 Herdr 客户端，通常在一秒内生效。新增或启用的机器在后台连接；重命名不会重新连接。移除或禁用只会断开该机器，远程会话仍会继续运行。移除正在查看的机器会返回 Local；如果 Local 不可用，则显示不可用状态，直到重新连接。每份配置在客户端状态文件中保存一个不透明 ID、标签、SSH 目标、明确的远程会话名和启用状态。Herdr 不保存密码、私钥或其他 SSH 凭据。
 

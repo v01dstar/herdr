@@ -53,6 +53,7 @@ with the installed binary. Use `--json` for the full JSON Schema document, or
 herdr machine list
 herdr machine add workbox
 herdr machine add workbox --label "Build machine"
+herdr machine add my-box --hangar
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
@@ -62,6 +63,8 @@ herdr machine remove <profile-id>
 In an interactive terminal, `machine add` discovers running sessions and lets you choose when several are running. No running sessions, or no Herdr installation, uses `default`; failed queries against an installed binary require an explicit choice. Add `--remote-session <name>` to skip discovery. Non-interactive commands use `default` unless that flag is supplied. `machine list` accepts optional `--json` for scripts. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide.
 
 `machine add` checks the remote installation's capabilities, installs or updates with approval only when needed, and starts the requested session's background server before saving. Compatible release versions do not need to match. Run setup in an interactive terminal when installation or restart approval is required; failed or cancelled setup does not save a profile. Replacing a running server requires explicit approval with a default answer of No, and stops its pane processes. `machine add` never enables experimental handoff implicitly.
+
+With `--hangar`, the argument is a hangar machine name or ID. Herdr uses the sign-in shared with the `hangar` CLI, connects through the hangar gateway with its own short-lived certificates, and uses the `herdr-remote` session unless `--remote-session` is given. A stopped machine is saved disabled and is not started. See [hangar machines](/docs/connecting-machines/#hangar-machines).
 
 Changes apply automatically to open local Herdr clients, normally within a second. Added or enabled machines connect in the background; renaming does not reconnect. Removing or disabling disconnects only that machine and leaves its remote sessions running. Removing the machine you are viewing returns to Local, or shows Local as unavailable until it reconnects. Each profile stores an opaque ID, label, SSH target, explicit remote session, and enabled state in client state. Herdr does not store passwords, private keys, or other SSH credentials.
 
