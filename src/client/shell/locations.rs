@@ -1,8 +1,6 @@
 use super::*;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
-use crate::client::locations::{
-    self as backend, CloudOperation, CloudTarget, LocationPreferences, RemoteOptions,
-};
+use crate::client::locations::{self as backend, LocationPreferences, RemoteOptions};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -37,32 +35,26 @@ impl LocationDialog {
             LocationDialogKind::Add(_) => "add remote",
             LocationDialogKind::Edit(_) => "remote settings",
             LocationDialogKind::New => "new workspace",
-            LocationDialogKind::Stop => "stop compute",
+            LocationDialogKind::Stop => "stop machine",
         }
     }
     pub fn labels(&self) -> &[&str] {
         match self.kind {
-            LocationDialogKind::Add(_) => &["Provider", "Project", "Compute"],
+            LocationDialogKind::Add(_) => &["Provider", "Machine", "Name"],
             LocationDialogKind::Manage => &[
                 "Location",
                 "Add remote",
                 "Edit remote",
                 "Test connection",
                 "Use as default",
-                "Compute status",
+                "Machine status",
                 "Start remote",
-                "Stop compute…",
+                "Stop machine…",
                 "Remove profile",
             ],
-            LocationDialogKind::Edit(_) => &[
-                "Name",
-                "SSH target",
-                "Herdr session",
-                "Default directory",
-                "Cloud project ID",
-                "Cloud branch",
-                "Compute name",
-            ],
+            LocationDialogKind::Edit(_) => {
+                &["Name", "SSH target", "Herdr session", "Default directory"]
+            }
             LocationDialogKind::New => &["Name", "Location", "Directory"],
             LocationDialogKind::Stop => &[],
         }
@@ -124,10 +116,18 @@ impl LocationDialog {
             || self.choice_field(self.selected)
             || matches!(
                 self.kind,
-                LocationDialogKind::Manage | LocationDialogKind::Stop | LocationDialogKind::Add(_)
+                LocationDialogKind::Manage | LocationDialogKind::Stop
             )
         {
             return None;
+        }
+        if let LocationDialogKind::Add(form) = &self.kind {
+            // The only text field of Add remote is the new machine's name.
+            return if self.selected == add::NAME_FIELD && form.edits_name() {
+                self.fields.get_mut(0)
+            } else {
+                None
+            };
         }
         self.fields.get_mut(self.selected)
     }
@@ -217,9 +217,10 @@ impl ClientShellState {
         self.locations.epoch = self.locations.epoch.wrapping_add(1);
         match self.location_dialog(LocationDialogKind::Manage) {
             Ok(mut dialog) => {
-                dialog.message =
-                    "Choose a location with ←/→. Removing a profile keeps its compute and data."
-                        .into();
+                dialog.message = LocationPreferences::take_notice().unwrap_or_else(|| {
+                    "Choose a location with ←/→. Removing a profile keeps its machine and data."
+                        .into()
+                });
                 self.overlay = Some(ClientShellOverlay::Locations(dialog));
             }
             Err(error) => self.set_endpoint_error(error),
@@ -273,25 +274,20 @@ impl ClientShellState {
                 .and_then(|p| dialog.prefs.remotes.get(&p.id))
                 .cloned()
                 .unwrap_or_default();
-            let cloud = options.cloud.unwrap_or(CloudTarget {
-                project: String::new(),
-                branch: "main".into(),
-                service: String::new(),
-                service_id: None,
-            });
             dialog.fields = [
                 profile.map_or("", |p| p.label.as_str()),
                 profile.map_or("", |p| p.target.as_str()),
                 profile.map_or("herdr-remote", |p| p.session.as_str()),
                 &options.cwd,
-                &cloud.project,
-                &cloud.branch,
-                &cloud.service,
             ]
             .iter()
             .map(|value| TextEditor::new(value, true))
             .collect();
-            dialog.message = "Use an existing SSH alias. Cloud binding is optional; leave project and compute empty for SSH only.".into();
+            dialog.message = if options.cloud.is_some() {
+                "This remote is a hangar machine; its SSH target is managed by Herdr.".into()
+            } else {
+                "Use an existing SSH alias. hangar machines are added from Add remote.".into()
+            };
             Ok::<_, String>(dialog)
         })();
         match result {
@@ -301,97 +297,68 @@ impl ClientShellState {
     }
 
     fn save_location(&mut self) -> Result<(), String> {
-        let _guard = backend::operation_lock()?;
-        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
-            return Ok(());
-        };
-        let LocationDialogKind::Edit(id) = &dialog.kind else {
-            return Ok(());
-        };
-        if let Some(id) = id {
-            let old = dialog
-                .profiles
-                .iter()
-                .find(|p| &p.id == id)
-                .ok_or("Remote was removed")?;
-            backend::validate_binding(
-                old,
-                dialog.prefs.remotes.get(id).and_then(|o| o.cloud.as_ref()),
-            )?;
-        }
-        let values = dialog
-            .fields
-            .iter()
-            .map(|f| f.trim().to_owned())
-            .collect::<Vec<_>>();
-        let mut profile = SavedSshEndpoint::new(&values[0], &values[1], &values[2])?;
-        let options = RemoteOptions {
-            cwd: values[3].clone(),
-            cloud: if values[4].is_empty() && values[6].is_empty() {
-                None
-            } else {
-                Some(CloudTarget {
-                    project: values[4].clone(),
-                    branch: values[5].clone(),
-                    service: values[6].clone(),
-                    service_id: None,
-                })
-            },
-        };
-        let mut options = options;
-        if let Some(id) = id {
-            if let Some(old) = dialog
-                .prefs
-                .remotes
-                .get(id)
-                .and_then(|o| o.cloud.as_ref())
-                .filter(|c| c.service_id.is_some())
-            {
-                let current = options.cloud.as_mut().ok_or(
-                    "Managed compute binding cannot be removed; remove the profile instead",
-                )?;
-                if current.project != old.project
-                    || current.branch != old.branch
-                    || current.service != old.service
-                {
-                    return Err("Managed compute identity cannot be edited; add the intended compute from Instacloud instead".into());
-                }
-                if dialog
+        {
+            let _guard = backend::operation_lock()?;
+            let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
+                return Ok(());
+            };
+            let LocationDialogKind::Edit(id) = &dialog.kind else {
+                return Ok(());
+            };
+            let old_binding = id.as_ref().and_then(|id| dialog.prefs.binding(id));
+            if let Some(id) = id {
+                let old = dialog
                     .profiles
                     .iter()
                     .find(|p| &p.id == id)
-                    .is_some_and(|p| p.target != profile.target)
+                    .ok_or("Remote was removed")?;
+                backend::validate_binding(old, old_binding)?;
+            }
+            let values = dialog
+                .fields
+                .iter()
+                .map(|f| f.trim().to_owned())
+                .collect::<Vec<_>>();
+            let mut profile = SavedSshEndpoint::new(&values[0], &values[1], &values[2])?;
+            if let Some(id) = id {
+                if old_binding.is_some()
+                    && dialog
+                        .profiles
+                        .iter()
+                        .find(|p| &p.id == id)
+                        .is_some_and(|p| p.target != profile.target)
                 {
-                    return Err("Instacloud manages this remote's SSH target".into());
+                    return Err("Herdr manages the SSH target of a hangar machine".into());
                 }
-                current.service_id = old.service_id.clone();
+            } else if crate::hangar::binding::is_hangar_target(&profile.target) {
+                return Err("Add hangar machines from Add remote → Provider: hangar".into());
             }
-        }
-        options.validate()?;
-        let _resource_guard = options
-            .cloud
-            .as_ref()
-            .map(backend::instacloud::provisioning::resource_lock)
-            .transpose()?;
-        let mut catalog = EndpointCatalog::load()?;
-        let mut prefs = LocationPreferences::load()?;
-        if let Some(id) = id {
-            let Some(old) = catalog.ssh.iter_mut().find(|p| &p.id == id) else {
-                return Err("Remote was removed by another client".into());
+            let options = RemoteOptions {
+                cwd: values[3].clone(),
+                // The binding is kept as is; it is never edited by hand.
+                cloud: old_binding.cloned(),
             };
-            profile.id = id.clone();
-            profile.enabled = old.enabled;
-            *old = profile.clone();
-        } else {
-            if catalog.ssh.len() >= 64 {
-                return Err("At most 64 remote profiles can be saved".into());
+            options.validate()?;
+            let mut catalog = EndpointCatalog::load()?;
+            let mut prefs = LocationPreferences::load()?;
+            if let Some(id) = id {
+                let Some(old) = catalog.ssh.iter_mut().find(|p| &p.id == id) else {
+                    return Err("Remote was removed by another client".into());
+                };
+                profile.id = id.clone();
+                profile.enabled = old.enabled;
+                *old = profile.clone();
+            } else {
+                if catalog.ssh.len() >= 64 {
+                    return Err("At most 64 remote profiles can be saved".into());
+                }
+                catalog.ssh.push(profile.clone());
             }
-            catalog.ssh.push(profile.clone());
+            prefs.remotes.insert(profile.id, options);
+            // Metadata first: a new endpoint must not appear with another endpoint's defaults.
+            prefs.store()?;
+            catalog.store_profiles()?;
         }
-        prefs.remotes.insert(profile.id, options);
-        // Metadata first: a new endpoint must not appear with another endpoint's defaults.
-        prefs.store()?;
-        catalog.store_profiles()?;
         self.open_locations();
         Ok(())
     }
@@ -446,8 +413,10 @@ impl ClientShellState {
                     self.submit_location_workspace(intent);
                 } else {
                     self.location_job(move || {
+                        // New workspace never starts a hangar machine; a stopped one
+                        // reports "use Start remote".
                         if let Some(p) = &intent.profile {
-                            backend::start_remote(p, &intent.options)?;
+                            backend::start_session(p, &intent.options)?;
                         }
                         Ok(JobResult::Ready(intent))
                     });
@@ -530,11 +499,11 @@ impl ClientShellState {
                 });
             }
             5 => {
-                let Some(cloud) = options.cloud else {
-                    return Err("This remote has no Instacloud binding".into());
-                };
+                if options.cloud.is_none() {
+                    return Err("This remote has no hangar machine".into());
+                }
                 self.location_job(move || {
-                    backend::cloud_operation(&cloud, CloudOperation::Status).map(JobResult::Message)
+                    backend::machine_status(&options).map(JobResult::Message)
                 });
             }
             6 => self.location_job(move || {
@@ -544,37 +513,18 @@ impl ClientShellState {
                 ))
             }),
             7 => {
-                if options.cloud.is_none() {
-                    return Err("Stop compute requires an Instacloud binding. Manage SSH-only server lifetime on its host.".into());
-                }
-                backend::validate_binding(&profile, options.cloud.as_ref())?;
+                let Some(cloud) = options.cloud.as_ref() else {
+                    return Err("Stop machine requires a hangar machine. Manage SSH-only server lifetime on its host.".into());
+                };
+                let name = cloud.hangar().machine_name.clone();
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                     dialog.kind = LocationDialogKind::Stop;
                     dialog.selected = 0;
-                    dialog.message = if let Some(cloud) = options.cloud {
-                        format!("Stop compute {} / {} / {}? All sessions and jobs on this compute will stop. Files on its volume remain; running processes do not survive.", cloud.project, cloud.branch, cloud.service)
-                    } else {
-                        format!("Stop {} / session {}? Its running jobs will stop. Automatic connection will be disabled.", profile.target, profile.session)
-                    };
+                    dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive. Automatic connection is disabled until Start remote.");
                 }
             }
             8 => {
-                let _guard = backend::operation_lock()?;
-                let _resource_guard = options
-                    .cloud
-                    .as_ref()
-                    .map(backend::instacloud::provisioning::resource_lock)
-                    .transpose()?;
-                backend::validate_binding(&profile, options.cloud.as_ref())?;
-                let mut catalog = EndpointCatalog::load()?;
-                catalog.remove_ssh(&profile.id);
-                catalog.store_profiles()?;
-                let mut prefs = LocationPreferences::load()?;
-                prefs.remotes.remove(&profile.id);
-                if prefs.default_profile.as_ref() == Some(&profile.id) {
-                    prefs.default_profile = None;
-                }
-                prefs.store()?;
+                backend::remove_remote(&profile, &options)?;
                 self.open_locations();
             }
             _ => {}
@@ -584,6 +534,7 @@ impl ClientShellState {
 
     pub(super) fn close_location(&mut self) {
         self.locations.epoch = self.locations.epoch.wrapping_add(1);
+        self.locations.add.cancel_sign_in();
         self.locations.created = None;
         self.locations.prepared = None;
         self.overlay = None;

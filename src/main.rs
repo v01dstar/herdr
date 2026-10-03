@@ -25,6 +25,7 @@ mod detect;
 mod events;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
+mod hangar;
 mod input;
 mod integration;
 mod ipc;

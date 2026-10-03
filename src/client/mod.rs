@@ -29,7 +29,7 @@ mod frame_output_tests;
 mod handshake;
 mod image_files;
 mod input;
-mod locations;
+pub(crate) mod locations;
 mod loop_config;
 mod notifications;
 mod shell;

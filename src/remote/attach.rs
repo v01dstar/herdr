@@ -63,7 +63,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.target.clone(),
         manage_ssh_config,
         session_name.clone(),
-    );
+    )?;
     let prepared_remote =
         prepare_remote_herdr(&remote_ssh, remote.live_handoff, require_surface_interest)?;
     ensure_remote_server_ready(
@@ -91,7 +91,7 @@ pub(crate) fn check_saved_ssh(target: &str, session: &str) -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned())?;
     ssh.session_name = session.to_owned();
     let remote = find_installed_remote_herdr(&ssh)?;
     match remote_server_status(&ssh, &remote, false)? {
@@ -122,7 +122,7 @@ pub(crate) fn check_saved_ssh(target: &str, session: &str) -> io::Result<()> {
 pub(crate) fn start_saved_ssh(target: &str, session: &str) -> io::Result<()> {
     super::validate_remote_target(target).map_err(io::Error::other)?;
     crate::session::validate_name(session).map_err(io::Error::other)?;
-    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned())?;
     ssh.session_name = session.to_owned();
     let remote = find_installed_remote_herdr(&ssh)?;
     let command = remote.executable.saved_bridge_command(session);
@@ -136,7 +136,7 @@ pub(crate) fn start_saved_ssh(target: &str, session: &str) -> io::Result<()> {
 pub(crate) fn stop_saved_ssh(target: &str, session: &str) -> io::Result<()> {
     super::validate_remote_target(target).map_err(io::Error::other)?;
     crate::session::validate_name(session).map_err(io::Error::other)?;
-    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    let mut ssh = RemoteSsh::new_noninteractive(target.to_owned())?;
     ssh.session_name = session.to_owned();
     let remote = find_installed_remote_herdr(&ssh)?;
     // Unlike the interactive remote setup flow, TUI background jobs must not print.
@@ -168,7 +168,7 @@ impl SavedSshSetup {
             target.to_owned(),
             manage,
             crate::session::DEFAULT_SESSION_NAME.to_owned(),
-        );
+        )?;
         let remote_herdr =
             RemoteHerdr::for_platform(detect_remote_platform(&ssh)?.into_setup_platform());
         let candidates = remote_binary_candidates(&ssh, &remote_herdr)?;
@@ -707,6 +707,9 @@ pub(super) struct PreparedRemoteHerdr {
 pub(super) struct ManagedSshOptions {
     config_path: PathBuf,
     control_path: Option<PathBuf>,
+    /// Set when the config holds a hangar `Host` block whose certificate file must be
+    /// renewed before each new `ssh` process.
+    hangar_target: Option<String>,
     // Bridge workers may launch SSH after the helper that created this config
     // has gone away. The last options owner removes only the temporary config.
     _directory: Arc<ManagedSshConfigDirectory>,
@@ -804,8 +807,13 @@ pub(super) struct RemoteSsh {
 }
 
 impl RemoteSsh {
-    fn new(target: String, manage_ssh_config: bool, session_name: String) -> Self {
-        let managed_config = if manage_ssh_config {
+    /// Fails only for a hangar target that cannot be prepared (signed out, machine
+    /// stopped or deleted). A hangar alias resolves only through herdr's config, so it is
+    /// written even with `manage_ssh_config=false` or without multiplexing (Windows).
+    fn new(target: String, manage_ssh_config: bool, session_name: String) -> io::Result<Self> {
+        let managed_config = if crate::hangar::binding::is_hangar_target(&target) {
+            Some(write_managed_ssh_config_for(&target, manage_ssh_config)?)
+        } else if manage_ssh_config {
             write_managed_ssh_config(&target)
                 .inspect_err(|err| {
                     tracing::debug!(%err, "could not write managed ssh config; using plain ssh");
@@ -815,23 +823,23 @@ impl RemoteSsh {
             None
         };
 
-        Self {
+        Ok(Self {
             target,
             session_name,
             managed_config,
             noninteractive: false,
-        }
+        })
     }
 
-    pub(super) fn new_noninteractive(target: String) -> Self {
+    pub(super) fn new_noninteractive(target: String) -> io::Result<Self> {
         let manage = crate::platform::remote_ssh_config_paths().multiplexing
             && crate::config::Config::load()
                 .config
                 .remote
                 .manage_ssh_config;
-        let mut ssh = Self::new(target, manage, crate::session::DEFAULT_SESSION_NAME.into());
+        let mut ssh = Self::new(target, manage, crate::session::DEFAULT_SESSION_NAME.into())?;
         ssh.noninteractive = true;
-        ssh
+        Ok(ssh)
     }
 
     fn target(&self) -> &str {
@@ -869,9 +877,6 @@ impl RemoteSsh {
 
     fn sh_output(&self, script: &str) -> io::Result<Output> {
         let script = posix_remote_output_command(script);
-        if self.target.ends_with(".insta") {
-            return self.gateway_probe_output(&script);
-        }
         let mut child = self
             .command()
             .arg("/bin/sh -s")
@@ -901,9 +906,6 @@ impl RemoteSsh {
     }
 
     fn framed_user_shell_output(&self, remote_command: &str) -> io::Result<Output> {
-        if self.target.ends_with(".insta") {
-            return self.gateway_probe_output(remote_command);
-        }
         let mut command = self.command();
         command
             // Windows OpenSSH can still read the console with stdin redirected to NUL.
@@ -917,23 +919,6 @@ impl RemoteSsh {
         } else {
             output_with_forwarded_stderr(command.spawn()?, None)
         }?;
-        normalize_remote_output(output)
-    }
-
-    fn gateway_probe_output(&self, script: &str) -> io::Result<Output> {
-        // InstaCloud's gateway currently truncates later stdout chunks after client
-        // stdin EOF. Keep the local pipe open until remote exit, while giving the
-        // remote command /dev/null so probes cannot wait for interactive input.
-        // Duplex client/API bridges already retain their stdin and need no change.
-        let mut child = self
-            .command()
-            .arg(format!("/bin/sh -c {} </dev/null", shell_quote(script)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let _input_lifetime = child.stdin.take();
-        let output = wait_with_output_timeout(child, NONINTERACTIVE_SSH_COMMAND_TIMEOUT)?;
         normalize_remote_output(output)
     }
 
@@ -1278,6 +1263,12 @@ fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshO
     let Some(options) = options else {
         return;
     };
+    if let Some(target) = &options.hangar_target {
+        // A failure surfaces as the ssh authentication error that follows.
+        if let Err(error) = crate::hangar::binding::refresh_certificate(target) {
+            tracing::warn!(%error, "could not renew the hangar SSH certificate");
+        }
+    }
 
     command.arg("-F").arg(&options.config_path);
     if let Some(control_path) = &options.control_path {
@@ -2982,9 +2973,26 @@ fn ssh_user_config_include(path: Option<&Path>) -> Option<String> {
 /// Builds a temporary ssh config that includes the user's settings first, so
 /// OpenSSH's first-value-wins behavior preserves explicit user keepalives.
 fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
+    write_managed_ssh_config_for(target, true)
+}
+
+/// A hangar target gets its `Host` block (gateway, certificate, host CA) ahead of the
+/// user's configuration. Preparing it checks the machine is running and never starts
+/// it; a stopped machine or a missing sign-in fails here, before any `ssh` runs.
+fn write_managed_ssh_config_for(target: &str, multiplex: bool) -> io::Result<ManagedSshConfig> {
+    let hangar_block = crate::hangar::binding::prepare_ssh_target(target)?;
+    write_managed_ssh_config_with(target, multiplex, hangar_block)
+}
+
+fn write_managed_ssh_config_with(
+    target: &str,
+    multiplex: bool,
+    hangar_block: Option<String>,
+) -> io::Result<ManagedSshConfig> {
     let paths = crate::platform::remote_ssh_config_paths();
-    let instacloud_gateway = target.ends_with(".insta");
-    let control_path = if paths.multiplexing && !instacloud_gateway {
+    // hangar's gateway closes live connections on stop, suspend and delete, so a
+    // shared master never outlives the machine runtime it reached.
+    let control_path = if paths.multiplexing && multiplex {
         Some(crate::platform::shared_ssh_control_path(
             &crate::config::config_path(),
             target,
@@ -2996,11 +3004,9 @@ fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
     let dir = crate::platform::create_remote_ssh_config_dir(SSH_CONTROL_SOCKET_NAME)?;
     let path = dir.join("config");
     let mut contents = String::new();
-    if instacloud_gateway {
-        // The gateway pins an authenticated transport to its original runtime.
-        // After compute Stop/Start that transport can still be alive but point to
-        // a deleted runtime. Fresh connections also bypass the CLI's own master.
-        contents.push_str("Host *\n  ControlMaster no\n  ControlPath none\n");
+    let hangar_target = hangar_block.is_some().then(|| target.to_owned());
+    if let Some(block) = hangar_block {
+        contents.push_str(&block);
     }
     if let Some(include) = ssh_user_config_include(paths.user_config.as_deref()) {
         contents.push_str(&format!("Include {include}\n"));
@@ -3027,6 +3033,7 @@ fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
         options: ManagedSshOptions {
             config_path: path,
             control_path,
+            hangar_target,
             _directory: Arc::new(ManagedSshConfigDirectory(dir)),
         },
     })
@@ -3913,7 +3920,7 @@ mod tests {
     #[test]
     fn authentication_command_uses_shared_transport_without_askpass_or_host_key_relaxation() {
         let config = write_managed_ssh_config("example").unwrap();
-        let setup = RemoteSsh::new("example".into(), true, "other-session".into());
+        let setup = RemoteSsh::new("example".into(), true, "other-session".into()).unwrap();
         assert_eq!(
             config.options.control_path,
             setup.options().unwrap().control_path
@@ -3957,7 +3964,7 @@ mod tests {
 
     #[test]
     fn unmanaged_ssh_setup_preserves_plain_transport() {
-        let ssh = RemoteSsh::new("example".into(), false, "main".into());
+        let ssh = RemoteSsh::new("example".into(), false, "main".into()).unwrap();
         assert!(ssh.options().is_none());
         assert!(!ssh.command().get_args().any(|arg| arg == "-F"));
     }
@@ -4154,7 +4161,7 @@ mod tests {
 
     #[test]
     fn noninteractive_ssh_command_cannot_prompt_or_accept_unknown_hosts() {
-        let ssh = RemoteSsh::new_noninteractive("example".into());
+        let ssh = RemoteSsh::new_noninteractive("example".into()).unwrap();
         let args = ssh
             .command()
             .get_args()
@@ -4256,16 +4263,39 @@ mod tests {
     }
 
     #[test]
-    fn instacloud_config_never_reuses_a_transport_pinned_to_an_old_runtime() {
-        let config = write_managed_ssh_config("fixture.insta").unwrap();
-        assert!(config.options.control_path.is_none());
+    fn hangar_host_block_precedes_user_config_and_keeps_multiplexing() {
+        let block =
+            "Host hangar-m_agqp6jaaa6kqkitog6zzqzdfhy\n  HostName 152.236.1.51\n  Port 2222\n";
+        let config = write_managed_ssh_config_with(
+            "hangar-m_agqp6jaaa6kqkitog6zzqzdfhy",
+            true,
+            Some(block.to_owned()),
+        )
+        .unwrap();
         let contents = std::fs::read_to_string(&config.options.config_path).unwrap();
-        assert!(contents.starts_with("Host *\n  ControlMaster no\n  ControlPath none\n"));
-        let mut command = Command::new("ssh");
-        apply_managed_ssh_options(&mut command, Some(&config.options));
-        assert!(!command
-            .get_args()
-            .any(|arg| arg == "-S" || arg == "ControlMaster=auto"));
+        assert!(contents.starts_with(block));
+        assert!(contents.contains("Host *\n  ServerAliveInterval 15\n"));
+        assert_eq!(
+            config.options.control_path.is_some(),
+            crate::platform::remote_ssh_config_paths().multiplexing
+        );
+        assert_eq!(
+            config.options.hangar_target.as_deref(),
+            Some("hangar-m_agqp6jaaa6kqkitog6zzqzdfhy")
+        );
+        // manage_ssh_config=false still needs the block, but no shared master.
+        let unmanaged = write_managed_ssh_config_with(
+            "hangar-m_agqp6jaaa6kqkitog6zzqzdfhy",
+            false,
+            Some(block.to_owned()),
+        )
+        .unwrap();
+        assert!(unmanaged.options.control_path.is_none());
+        let plain = write_managed_ssh_config("example").unwrap();
+        assert!(plain.options.hangar_target.is_none());
+        assert!(!std::fs::read_to_string(&plain.options.config_path)
+            .unwrap()
+            .contains("hangar"));
     }
 
     #[test]

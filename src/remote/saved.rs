@@ -140,6 +140,7 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
         "install or update",
         "protocol",
         "handshake",
+        "use start remote",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -156,7 +157,7 @@ fn validated_saved_ssh(profile_id: &str, target: &str, session: &str) -> io::Res
     validate_profile_path_id(profile_id)?;
     crate::session::validate_name(session)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    Ok(RemoteSsh::new_noninteractive(target.to_owned()))
+    RemoteSsh::new_noninteractive(target.to_owned())
 }
 
 fn validate_profile_path_id(profile_id: &str) -> io::Result<()> {
@@ -202,6 +203,7 @@ mod tests {
             "Host key verification failed",
             "matching Herdr is not ready; install or update",
             "handshake rejected",
+            "hangar machine box is stopped; use Start remote to start it.",
         ] {
             assert!(saved_ssh_failure_needs_attention(&io::Error::other(
                 message

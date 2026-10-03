@@ -12,6 +12,7 @@ const HELP: &str = "Usage:
   herdr machine status [<label-or-id>] [--json]
   herdr machine reconnect <label-or-id>
   herdr machine add <ssh-target> [--label <label>] [--remote-session <name>]
+  herdr machine add <hangar-machine> --hangar [--label <label>] [--remote-session <name>]
   herdr machine rename <profile-id> --label <label>
   herdr machine remove <profile-id>
   herdr machine enable <profile-id>
@@ -22,7 +23,10 @@ Missing or incompatible installations require approval in an interactive termina
 Changes apply automatically to open local Herdr clients.
 Removing or disabling a machine leaves its remote sessions running.
 Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
-SSH credentials and key material remain owned by OpenSSH.";
+SSH credentials and key material remain owned by OpenSSH.
+With --hangar, the machine is reached through the hangar gateway with short-lived
+certificates, using the sign-in shared with the hangar CLI. Stopped machines are
+saved disabled and never started.";
 
 #[derive(Serialize)]
 struct MachineListRow<'a> {
@@ -212,6 +216,7 @@ struct AddArgs {
     target: String,
     label: Option<String>,
     session: Option<String>,
+    hangar: bool,
 }
 
 fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
@@ -219,9 +224,15 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
     let mut target = None;
     let mut label = None;
     let mut session = None;
+    let mut hangar = false;
     let mut index = 0;
     while index < args.len() {
         let (name, value) = match args[index].as_str() {
+            "--hangar" if !hangar => {
+                hangar = true;
+                index += 1;
+                continue;
+            }
             "--label" | "--remote-session" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err(format!("missing value for {}", args[index]));
@@ -258,6 +269,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
         target,
         label,
         session,
+        hangar,
     })
 }
 
@@ -301,6 +313,7 @@ fn add(args: &[String]) -> std::io::Result<i32> {
         target,
         label,
         session,
+        hangar,
     } = match parse_add_args(args) {
         Ok(args) => args,
         Err(error) => {
@@ -308,6 +321,9 @@ fn add(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
+    if hangar {
+        return add_hangar(&target, label, session);
+    }
     let mut setup = None;
     let session =
         if session.is_none() && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
@@ -387,6 +403,72 @@ fn add(args: &[String]) -> std::io::Result<i32> {
     }
     println!("Saved SSH machine {id}. Remote server is ready.");
     println!("Open Herdr clients connect automatically.");
+    Ok(0)
+}
+
+/// Binds a hangar machine. A running machine is prepared like any SSH machine (with
+/// installation approval when needed) before it is saved; a stopped one is saved
+/// disabled and left stopped.
+fn add_hangar(
+    selector: &str,
+    label: Option<String>,
+    session: Option<String>,
+) -> std::io::Result<i32> {
+    use crate::client::locations::hangar as machines;
+    let server = crate::hangar::default_server();
+    let machine = match machines::resolve_machine(&server, selector) {
+        Ok(machine) => machine,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Ok(1);
+        }
+    };
+    let session = session.unwrap_or_else(|| machines::SESSION.to_owned());
+    let running = machine.state == crate::hangar::api::MachineState::Running;
+    let alias = crate::hangar::binding::alias_for(&machine.id);
+    let metadata = if running {
+        match crate::remote::SavedSshSetup::connect(&alias)
+            .and_then(|setup| setup.prepare(&session))
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!("error: {error}; machine was not saved");
+                return Ok(1);
+            }
+        }
+    } else {
+        None
+    };
+    let (profile, _) =
+        match machines::save_binding(&server, &machine, label.as_deref(), &session, running) {
+            Ok(saved) => saved,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return Ok(2);
+            }
+        };
+    if let Some(metadata) = metadata {
+        crate::client::endpoint::SshMetadataCache::new(
+            profile.id.as_str(),
+            &profile.target,
+            &profile.session,
+        )?
+        .store(&metadata);
+    }
+    if running {
+        println!(
+            "Saved hangar machine {} as {}. Remote server is ready.",
+            machine.name, profile.id
+        );
+        println!("Open Herdr clients connect automatically.");
+    } else {
+        println!(
+            "Saved hangar machine {} as {} (disabled). It is {}; start it from Settings → remotes → Start remote.",
+            machine.name,
+            profile.id,
+            machine.state.as_str()
+        );
+    }
     Ok(0)
 }
 
@@ -524,6 +606,12 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
         return Ok(1);
     }
     store_catalog(&catalog)?;
+    // Default directory and hangar binding belong to the profile; the machine stays.
+    if let Err(error) = crate::client::locations::operation_lock()
+        .and_then(|_guard| crate::client::locations::remove_binding(&id))
+    {
+        eprintln!("warning: could not remove remote settings for {id}: {error}");
+    }
     if let Some(cache) = metadata_cache {
         cache.invalidate();
     }
@@ -614,10 +702,19 @@ mod tests {
                     target: "workstation.coder".into(),
                     label: Some("coder".into()),
                     session: session.map(str::to_owned),
+                    hangar: false,
                 },
                 "{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn add_parser_accepts_hangar_once() {
+        let args = ["box", "--hangar"].map(str::to_owned);
+        assert!(parse_add_args(&args).unwrap().hangar);
+        let twice = ["box", "--hangar", "--hangar"].map(str::to_owned);
+        assert!(parse_add_args(&twice).is_err());
     }
 
     #[test]

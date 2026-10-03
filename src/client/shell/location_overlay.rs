@@ -119,8 +119,7 @@ pub(in crate::client::shell) fn render_locations(
     })
 }
 
-use crate::client::locations::instacloud::provisioning;
-use crate::client::shell::locations::add::AddRemoteForm;
+use crate::client::shell::locations::add::{AddRemoteForm, NAME_FIELD};
 
 pub(in crate::client::shell) fn render_add_remote(
     buffer: &mut Buffer,
@@ -144,7 +143,8 @@ pub(in crate::client::shell) fn render_add_remote(
         normal.add_modifier(Modifier::BOLD),
     );
     let mut hits = Vec::new();
-    for (i, label) in ["Provider", "Project", "Compute"].iter().enumerate() {
+    let mut cursor = None;
+    for (i, label) in dialog.labels().iter().enumerate() {
         let rect = Rect::new(
             inner.x + 1,
             inner.y + 2 + i as u16 * 2,
@@ -156,6 +156,26 @@ pub(in crate::client::shell) fn render_add_remote(
         } else {
             normal
         };
+        if i == NAME_FIELD {
+            // Only creating a machine needs a name.
+            if !form.creating() {
+                continue;
+            }
+            buffer.set_style(rect, style);
+            let prefix = format!("{label:<10} ");
+            let width = display_width(&prefix).min(rect.width);
+            put_text(buffer, rect.x, rect.y, width, &prefix, style);
+            if let Some(editor) = dialog.fields.first() {
+                let input = Rect::new(rect.x + width, rect.y, rect.width.saturating_sub(width), 1);
+                let input_cursor =
+                    crate::client::shell::text_editor::render(buffer, input, editor, style);
+                if dialog.selected == i && !dialog.busy && form.edits_name() {
+                    cursor = input_cursor;
+                }
+            }
+            hits.push((rect, i));
+            continue;
+        }
         buffer.set_style(rect, style);
         put_text(
             buffer,
@@ -186,11 +206,7 @@ pub(in crate::client::shell) fn render_add_remote(
     let text = if dialog.busy {
         " working… "
     } else {
-        match form.choice {
-            provisioning::Selection::New => " create and connect ",
-            provisioning::Selection::Existing { .. } => " connect ",
-            provisioning::Selection::Resume(_) => " resume setup ",
-        }
+        form.primary_label()
     };
     button(
         buffer,
@@ -240,6 +256,11 @@ pub(in crate::client::shell) fn render_add_remote(
         primary,
         cancel,
         settings_choices: hits,
+        cursor: if form.dropdown.is_some() {
+            None
+        } else {
+            cursor
+        },
         ..Default::default()
     })
 }

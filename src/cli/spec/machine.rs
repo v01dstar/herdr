@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 
-use super::{json_flag, option};
+use super::{flag, json_flag, option};
 
 pub(super) fn command() -> Command {
     Command::new("machine")
@@ -37,7 +37,10 @@ pub(super) fn command() -> Command {
                 .arg(
                     option("remote-session", "NAME")
                         .help("Select a session explicitly (default without an interactive terminal)"),
-                ),
+                )
+                .arg(flag("hangar").help(
+                    "Treat the argument as a hangar machine name or ID and connect through the hangar gateway",
+                )),
         )
         .subcommand(
             profile_command("rename", "Rename a saved SSH machine").arg(
