@@ -55,7 +55,7 @@ herdr machine add my-box --hangar
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
-herdr machine remove <profile-id>
+herdr machine remove <profile-id> [--delete-machine]
 ```
 
 対話型ターミナルでは、`machine add` は実行中のセッションを検出し、複数あれば選択できます。実行中のセッションがない場合や Herdr がインストールされていない場合は `default` を使います。インストール済みバイナリへの問い合わせに失敗した場合は、明示的な選択が必要です。検出を省略するには `--remote-session <name>` を追加します。非対話型コマンドでは、このフラグがない限り `default` を使います。スクリプトでは `machine list` に `--json` を追加できます。詳しくは[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。

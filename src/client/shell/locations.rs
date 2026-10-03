@@ -1,10 +1,15 @@
 use super::*;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
 use crate::client::locations::{self as backend, LocationPreferences, RemoteOptions};
+use crate::hangar::api::MachineState;
+use crate::hangar::binding::HangarBinding;
+use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(super) mod add;
+
+const START_ROW: usize = 6;
 
 #[derive(Debug)]
 pub(super) enum LocationDialogKind {
@@ -13,6 +18,16 @@ pub(super) enum LocationDialogKind {
     Edit(Option<ProfileId>),
     New,
     Stop,
+    Suspend,
+    Delete(Box<DeleteRequest>),
+}
+
+/// A confirmed Remove remote deletes this hangar machine.
+#[derive(Clone, Debug)]
+pub(super) struct DeleteRequest {
+    pub binding: HangarBinding,
+    /// The remote whose machine is deleted; `None` for a machine no remote uses.
+    pub remote: Option<(SavedSshEndpoint, RemoteOptions)>,
 }
 
 #[derive(Debug)]
@@ -26,6 +41,9 @@ pub(super) struct LocationDialog {
     pub prefs: LocationPreferences,
     pub message: String,
     pub busy: bool,
+    /// Last known hangar machine states by (server, machine ID); presentation only,
+    /// refreshed by a worker. Missing means unknown.
+    pub machine_states: BTreeMap<(String, String), MachineState>,
 }
 
 impl LocationDialog {
@@ -36,6 +54,8 @@ impl LocationDialog {
             LocationDialogKind::Edit(_) => "remote settings",
             LocationDialogKind::New => "new workspace",
             LocationDialogKind::Stop => "stop machine",
+            LocationDialogKind::Suspend => "suspend machine",
+            LocationDialogKind::Delete(_) => "delete machine",
         }
     }
     pub fn labels(&self) -> &[&str] {
@@ -49,16 +69,42 @@ impl LocationDialog {
                 "Use as default",
                 "Machine status",
                 "Start remote",
+                "Suspend remote…",
                 "Stop machine…",
+                "Remove remote…",
                 "Remove profile",
             ],
             LocationDialogKind::Edit(_) => {
                 &["Name", "SSH target", "Herdr session", "Default directory"]
             }
             LocationDialogKind::New => &["Name", "Location", "Directory"],
-            LocationDialogKind::Stop => &[],
+            LocationDialogKind::Stop
+            | LocationDialogKind::Suspend
+            | LocationDialogKind::Delete(_) => &[],
         }
     }
+    /// The selected remote's hangar machine state, when known.
+    pub fn machine_state(&self) -> Option<MachineState> {
+        let binding = self
+            .profile()
+            .and_then(|profile| self.prefs.binding(&profile.id))?
+            .hangar();
+        self.machine_states
+            .get(&(binding.server.clone(), binding.machine_id.clone()))
+            .copied()
+    }
+
+    /// Row text; Start remote reads Resume remote for a suspended machine.
+    pub fn row_label(&self, index: usize) -> &str {
+        if matches!(self.kind, LocationDialogKind::Manage)
+            && index == START_ROW
+            && self.machine_state() == Some(MachineState::Suspended)
+        {
+            return "Resume remote";
+        }
+        self.labels().get(index).copied().unwrap_or("")
+    }
+
     pub fn profile(&self) -> Option<&SavedSshEndpoint> {
         self.location
             .checked_sub(1)
@@ -87,6 +133,8 @@ impl LocationDialog {
                     p.label,
                     if p.enabled {
                         ""
+                    } else if self.machine_state() == Some(MachineState::Suspended) {
+                        " (suspended)"
                     } else {
                         " (stopped / disabled)"
                     }
@@ -116,7 +164,10 @@ impl LocationDialog {
             || self.choice_field(self.selected)
             || matches!(
                 self.kind,
-                LocationDialogKind::Manage | LocationDialogKind::Stop
+                LocationDialogKind::Manage
+                    | LocationDialogKind::Stop
+                    | LocationDialogKind::Suspend
+                    | LocationDialogKind::Delete(_)
             )
         {
             return None;
@@ -185,7 +236,10 @@ pub(super) struct LocationController {
     job: Option<(u64, mpsc::Receiver<Result<JobResult, String>>)>,
     prepared: Option<(u64, NewLocationWorkspace, Instant)>,
     created: Option<CreatedLocationWorkspace>,
+    states: Option<(u64, mpsc::Receiver<MachineStates>)>,
 }
+
+type MachineStates = Vec<((String, String), MachineState)>;
 
 impl ClientShellState {
     fn location_dialog(&mut self, kind: LocationDialogKind) -> Result<LocationDialog, String> {
@@ -202,6 +256,7 @@ impl ClientShellState {
             prefs,
             message: String::new(),
             busy: false,
+            machine_states: BTreeMap::new(),
         })
     }
 
@@ -218,13 +273,49 @@ impl ClientShellState {
         match self.location_dialog(LocationDialogKind::Manage) {
             Ok(mut dialog) => {
                 dialog.message = LocationPreferences::take_notice().unwrap_or_else(|| {
-                    "Choose a location with ←/→. Removing a profile keeps its machine and data."
+                    "Choose a location with ←/→. Removing a hangar remote deletes its machine after you confirm."
                         .into()
                 });
                 self.overlay = Some(ClientShellOverlay::Locations(dialog));
+                self.refresh_machine_states();
             }
             Err(error) => self.set_endpoint_error(error),
         }
+    }
+
+    /// Fetches hangar machine states for the remotes dialog on a worker. Unknown states
+    /// (signed out, unreachable) just keep the plain labels.
+    fn refresh_machine_states(&mut self) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
+            return;
+        };
+        let mut servers = dialog
+            .prefs
+            .remotes
+            .values()
+            .filter_map(|options| options.cloud.as_ref())
+            .map(|cloud| cloud.hangar().server.clone())
+            .collect::<Vec<_>>();
+        servers.sort();
+        servers.dedup();
+        if servers.is_empty() {
+            return;
+        }
+        let (send, receive) = mpsc::channel();
+        self.locations.states = Some((self.locations.epoch, receive));
+        std::thread::spawn(move || {
+            let mut states = Vec::new();
+            for server in servers {
+                match backend::hangar::machine_states(&server) {
+                    Ok(list) => states.extend(
+                        list.into_iter()
+                            .map(|(id, state)| ((server.clone(), id), state)),
+                    ),
+                    Err(error) => tracing::debug!(%error, "could not read hangar machine states"),
+                }
+            }
+            let _ = send.send(states);
+        });
     }
 
     pub(super) fn open_location_workspace(&mut self) {
@@ -431,6 +522,27 @@ impl ClientShellState {
                 }
                 Ok(())
             }
+            LocationDialogKind::Suspend => {
+                if let Some(profile) = profile {
+                    self.location_job(move || {
+                        backend::suspend_remote(&profile, &options).map(JobResult::Message)
+                    });
+                }
+                Ok(())
+            }
+            LocationDialogKind::Delete(request) => {
+                let request = (**request).clone();
+                self.location_job(move || {
+                    match &request.remote {
+                        Some((profile, options)) => {
+                            backend::delete_remote(profile, options, &mut |_| {})
+                        }
+                        None => backend::delete_unbound_machine(&request.binding, &mut |_| {}),
+                    }
+                    .map(JobResult::Message)
+                });
+                Ok(())
+            }
             LocationDialogKind::Manage => {
                 let selected = dialog.selected;
                 match selected {
@@ -506,13 +618,34 @@ impl ClientShellState {
                     backend::machine_status(&options).map(JobResult::Message)
                 });
             }
-            6 => self.location_job(move || {
-                backend::start_remote(&profile, &options)?;
-                Ok(JobResult::Message(
-                    "Remote is ready; automatic connection enabled".into(),
-                ))
-            }),
+            START_ROW => {
+                let resuming = matches!(
+                    self.overlay.as_ref(),
+                    Some(ClientShellOverlay::Locations(dialog))
+                        if dialog.machine_state() == Some(MachineState::Suspended)
+                );
+                // hangar's start resumes a suspended machine from its snapshot.
+                self.location_job(move || {
+                    backend::start_remote(&profile, &options)?;
+                    Ok(JobResult::Message(if resuming {
+                        "Remote resumed; automatic connection enabled".into()
+                    } else {
+                        "Remote is ready; automatic connection enabled".into()
+                    }))
+                })
+            }
             7 => {
+                let Some(cloud) = options.cloud.as_ref() else {
+                    return Err("Suspend remote requires a hangar machine.".into());
+                };
+                let name = cloud.hangar().machine_name.clone();
+                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                    dialog.kind = LocationDialogKind::Suspend;
+                    dialog.selected = 0;
+                    dialog.message = format!("Suspend hangar machine {name}? Its memory is saved to a snapshot, so running programs and Herdr sessions continue after Resume remote. (Stop machine… shuts everything down instead; only files on disk remain.) Automatic connection is disabled until Resume remote.");
+                }
+            }
+            8 => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Stop machine requires a hangar machine. Manage SSH-only server lifetime on its host.".into());
                 };
@@ -520,16 +653,49 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                     dialog.kind = LocationDialogKind::Stop;
                     dialog.selected = 0;
-                    dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive. Automatic connection is disabled until Start remote.");
+                    dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend remote… keeps them). Automatic connection is disabled until Start remote.");
                 }
             }
-            8 => {
-                backend::remove_remote(&profile, &options)?;
-                self.open_locations();
-            }
+            9 | 10 => match options.cloud.clone() {
+                Some(cloud) => self.confirm_delete(DeleteRequest {
+                    binding: cloud.hangar().clone(),
+                    remote: Some((profile, options)),
+                }),
+                None if action == 9 => {
+                    return Err(
+                        "This SSH remote has no hangar machine to delete. Use Remove profile."
+                            .into(),
+                    )
+                }
+                None => {
+                    backend::remove_remote(&profile, &options)?;
+                    self.open_locations();
+                }
+            },
             _ => {}
         }
         Ok(())
+    }
+
+    /// Shows what a confirmed delete destroys: the machine, its disks and snapshots,
+    /// and every Herdr remote bound to it.
+    pub(super) fn confirm_delete(&mut self, request: DeleteRequest) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+        let cloud = backend::CloudBinding::Hangar(request.binding.clone());
+        let labels = if request.remote.is_some() {
+            backend::machine_profiles(&dialog.profiles, &dialog.prefs, &cloud)
+                .iter()
+                .map(|profile| profile.label.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
+        dialog.message = backend::delete_confirmation(&request.binding.machine_name, &labels);
+        dialog.kind = LocationDialogKind::Delete(Box::new(request));
+        dialog.selected = 0;
     }
 
     pub(super) fn close_location(&mut self) {
@@ -623,6 +789,26 @@ impl ClientShellState {
 
     pub(crate) fn tick_locations(&mut self, outcome: &mut ClientShellInput) {
         self.tick_add_remote(outcome);
+        let states = self
+            .locations
+            .states
+            .as_ref()
+            .and_then(|(epoch, receiver)| match receiver.try_recv() {
+                Ok(states) => Some((*epoch, Some(states))),
+                Err(mpsc::TryRecvError::Disconnected) => Some((*epoch, None)),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some((epoch, states)) = states {
+            self.locations.states = None;
+            if let (Some(states), Some(ClientShellOverlay::Locations(dialog))) =
+                (states, self.overlay.as_mut())
+            {
+                if epoch == self.locations.epoch {
+                    dialog.machine_states = states.into_iter().collect();
+                    outcome.repaint = true;
+                }
+            }
+        }
         let received =
             self.locations
                 .job
@@ -634,6 +820,7 @@ impl ClientShellState {
                     }
                     Err(mpsc::TryRecvError::Empty) => None,
                 });
+        let mut refresh_states = false;
         if let Some((epoch, result)) = received {
             self.locations.job = None;
             let current = epoch == self.locations.epoch
@@ -674,14 +861,26 @@ impl ClientShellState {
                     dialog.busy =
                         self.locations.created.is_some() || self.locations.prepared.is_some();
                     dialog.message = message;
+                    if matches!(dialog.kind, LocationDialogKind::Delete(_)) {
+                        // A finished delete never stays armed for a second Enter.
+                        dialog.kind = LocationDialogKind::Manage;
+                        dialog.selected = 0;
+                    }
+                    if let Ok(prefs) = LocationPreferences::load() {
+                        dialog.prefs = prefs;
+                    }
                     if let Ok(profiles) = EndpointCatalog::load_profiles() {
                         dialog.replace_profiles(profiles);
                     }
+                    refresh_states = true;
                 }
             } else {
                 self.set_endpoint_error(message);
             }
             outcome.repaint = true;
+        }
+        if refresh_states {
+            self.refresh_machine_states();
         }
         let owns_new_dialog = matches!(
             self.overlay,
@@ -787,11 +986,125 @@ mod tests {
             prefs,
             message: String::new(),
             busy: false,
+            machine_states: BTreeMap::new(),
         }
     }
 
     pub(super) fn shell() -> ClientShellState {
         ClientShellState::new(ClientShellConfig::from_config(&Config::default()))
+    }
+
+    const MACHINE: &str = "m_agqp6jaaa6kqkitog6zzqzdfhy";
+
+    /// A Manage dialog whose first two remotes share one hangar machine.
+    fn hangar_dialog() -> LocationDialog {
+        let mut dialog = dialog();
+        let binding = HangarBinding::new("https://hangar.test", MACHINE, "box").unwrap();
+        let alias = binding.alias.clone();
+        let first = SavedSshEndpoint::new("box", &alias, "herdr-remote").unwrap();
+        let second = SavedSshEndpoint::new("box agents", &alias, "agents").unwrap();
+        for profile in [&first, &second] {
+            dialog.prefs.remotes.insert(
+                profile.id.clone(),
+                RemoteOptions {
+                    cwd: String::new(),
+                    cloud: Some(backend::CloudBinding::Hangar(binding.clone())),
+                },
+            );
+        }
+        dialog.profiles.insert(0, second);
+        dialog.profiles.insert(0, first);
+        dialog.kind = LocationDialogKind::Manage;
+        dialog.location = 1;
+        dialog.selected = 0;
+        dialog
+    }
+
+    #[test]
+    fn remove_remote_confirmation_names_machine_and_every_bound_remote() {
+        let mut state = shell();
+        let dialog = hangar_dialog();
+        let profile = dialog.profiles[0].clone();
+        let options = dialog.prefs.remotes[&profile.id].clone();
+        let binding = options.cloud.as_ref().unwrap().hangar().clone();
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        state.confirm_delete(DeleteRequest {
+            binding,
+            remote: Some((profile, options)),
+        });
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert!(matches!(dialog.kind, LocationDialogKind::Delete(_)));
+        assert!(dialog.message.contains("'box'"), "{}", dialog.message);
+        assert!(dialog
+            .message
+            .contains("disks and snapshots are permanently deleted"));
+        assert!(
+            dialog.message.contains("'box', 'box agents'"),
+            "{}",
+            dialog.message
+        );
+        assert!(!dialog.message.contains("Remote A"));
+        assert!(state.locations.job.is_none(), "nothing runs before Enter");
+        state.compose(110, 35).unwrap();
+    }
+
+    #[test]
+    fn a_finished_delete_returns_to_the_remote_list_instead_of_staying_armed() {
+        let mut state = shell();
+        let mut dialog = hangar_dialog();
+        let binding = HangarBinding::new("https://hangar.test", MACHINE, "box").unwrap();
+        dialog.kind = LocationDialogKind::Delete(Box::new(DeleteRequest {
+            binding,
+            remote: None,
+        }));
+        dialog.busy = true;
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        let (send, receive) = mpsc::channel();
+        state.locations.job = Some((state.locations.epoch, receive));
+        send.send(Err("Could not delete 'box': hangar error".into()))
+            .unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+        assert!(!dialog.busy);
+        assert!(dialog.message.contains("Could not delete"));
+    }
+
+    #[test]
+    fn a_suspended_machine_offers_resume_and_is_labelled_suspended() {
+        let mut state = shell();
+        let mut dialog = hangar_dialog();
+        dialog.profiles[0].enabled = false;
+        assert_eq!(dialog.row_label(START_ROW), "Start remote");
+        assert!(dialog.location_label().ends_with("(stopped / disabled)"));
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        let (send, receive) = mpsc::channel();
+        state.locations.states = Some((state.locations.epoch, receive));
+        send.send(vec![(
+            ("https://hangar.test".to_owned(), MACHINE.to_owned()),
+            MachineState::Suspended,
+        )])
+        .unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert_eq!(dialog.row_label(START_ROW), "Resume remote");
+        assert!(dialog.location_label().ends_with("(suspended)"));
+        assert_eq!(dialog.row_label(START_ROW + 1), "Suspend remote…");
+        // A state result for an older dialog is ignored.
+        let (send, receive) = mpsc::channel();
+        state.locations.states = Some((state.locations.epoch.wrapping_sub(1), receive));
+        send.send(Vec::new()).unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert_eq!(dialog.machine_state(), Some(MachineState::Suspended));
     }
 
     #[test]

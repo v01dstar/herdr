@@ -318,6 +318,10 @@ impl std::fmt::Display for HangarError {
                 f,
                 "Signed in to hangar at {signed_in}, not {wanted}. Sign in again for {wanted}."
             ),
+            Self::MachineNotRunning { machine, state } if state == "suspended" => write!(
+                f,
+                "hangar machine {machine} is suspended; use Resume remote to resume it."
+            ),
             Self::MachineNotRunning { machine, state } => write!(
                 f,
                 "hangar machine {machine} is {state}; use Start remote to start it."
@@ -694,6 +698,28 @@ impl Client {
         self.call(
             "POST",
             &format!("/v1/machines/{}/stop", path_segment(id)?),
+            None,
+            Some(key),
+            true,
+        )
+    }
+
+    /// Snapshots a running machine's memory and stops it; start resumes it.
+    pub(crate) fn suspend_machine(&self, key: &str, id: &str) -> Result<Operation, HangarError> {
+        self.call(
+            "POST",
+            &format!("/v1/machines/{}/suspend", path_segment(id)?),
+            None,
+            Some(key),
+            true,
+        )
+    }
+
+    /// Deletes the machine with its persistent disk and snapshots.
+    pub(crate) fn delete_machine(&self, key: &str, id: &str) -> Result<Operation, HangarError> {
+        self.call(
+            "DELETE",
+            &format!("/v1/machines/{}", path_segment(id)?),
             None,
             Some(key),
             true,

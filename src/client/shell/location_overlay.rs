@@ -61,7 +61,7 @@ pub(in crate::client::shell) fn render_locations(
                 rect.x,
                 rect.y,
                 rect.width,
-                &format!(" {label}"),
+                &format!(" {}", dialog.row_label(index)),
                 style,
             );
         } else if let Some(editor) = dialog.fields.get(index) {
@@ -78,12 +78,22 @@ pub(in crate::client::shell) fn render_locations(
         hits.push((rect, index));
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
-    let message_area = Rect::new(
-        inner.x + 1,
-        inner.bottom().saturating_sub(5),
-        inner.width.saturating_sub(2),
-        4,
-    );
+    // Confirmations have no rows, so their text gets the whole body.
+    let message_area = if dialog.labels().is_empty() {
+        Rect::new(
+            inner.x + 1,
+            inner.y + 2,
+            inner.width.saturating_sub(2),
+            inner.height.saturating_sub(4),
+        )
+    } else {
+        Rect::new(
+            inner.x + 1,
+            inner.bottom().saturating_sub(5),
+            inner.width.saturating_sub(2),
+            4,
+        )
+    };
     Paragraph::new(dialog.message.as_str())
         .style(normal)
         .wrap(Wrap { trim: true })
@@ -100,6 +110,8 @@ pub(in crate::client::shell) fn render_locations(
             LocationDialogKind::Edit(_) => " ↵ save ",
             LocationDialogKind::New => " ↵ create ",
             LocationDialogKind::Stop => " ↵ stop ",
+            LocationDialogKind::Suspend => " ↵ suspend ",
+            LocationDialogKind::Delete(_) => " ↵ delete ",
         }
     };
     button(
@@ -156,6 +168,20 @@ pub(in crate::client::shell) fn render_add_remote(
         } else {
             normal
         };
+        if i == NAME_FIELD && form.deletable().is_some() {
+            // A machine no remote uses can be deleted instead of added.
+            buffer.set_style(rect, style);
+            put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width,
+                &format!("{:<10} [ Delete machine… ]", ""),
+                style,
+            );
+            hits.push((rect, i));
+            continue;
+        }
         if i == NAME_FIELD {
             // Only creating a machine needs a name.
             if !form.creating() {

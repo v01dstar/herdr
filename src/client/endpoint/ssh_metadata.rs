@@ -53,9 +53,7 @@ impl SshMetadataCache {
         let id = ProfileId::parse(profile_id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         Ok(Self {
-            path: crate::config::state_dir()
-                .join("client/ssh-metadata")
-                .join(format!("{id}.json")),
+            path: metadata_dir().join(format!("{id}.json")),
             target: target.to_owned(),
             session: session.to_owned(),
         })
@@ -94,9 +92,38 @@ impl SshMetadataCache {
     }
 }
 
-fn load_metadata(path: &Path, target: &str, session: &str) -> Option<SshMachineMetadata> {
-    let file_type = std::fs::symlink_metadata(path).ok()?.file_type();
-    if !file_type.is_file() {
+fn metadata_dir() -> PathBuf {
+    crate::config::state_dir().join("client/ssh-metadata")
+}
+
+/// Removes cached metadata for every profile and session that used `target`,
+/// including entries left behind by profiles removed earlier.
+pub(crate) fn invalidate_target(target: &str) {
+    if let Err(error) = invalidate_target_in(&metadata_dir(), target) {
+        tracing::debug!(%error, "could not invalidate SSH metadata for a removed target");
+    }
+}
+
+fn invalidate_target_in(dir: &Path, target: &str) -> io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let Some(stored) = read_stored(&path) else {
+            continue;
+        };
+        if stored.target == target {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_stored(path: &Path) -> Option<StoredMetadata> {
+    if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
         return None;
     }
     let mut bytes = Vec::new();
@@ -108,7 +135,11 @@ fn load_metadata(path: &Path, target: &str, session: &str) -> Option<SshMachineM
     if bytes.len() as u64 > MAX_METADATA_BYTES {
         return None;
     }
-    let stored: StoredMetadata = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn load_metadata(path: &Path, target: &str, session: &str) -> Option<SshMachineMetadata> {
+    let stored = read_stored(path)?;
     (stored.version == 1
         && stored.target == target
         && stored.session == session
@@ -193,6 +224,35 @@ mod tests {
         }
         first.invalidate();
         assert_eq!(second.load(), Some(metadata));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalidating_a_target_removes_only_its_entries() {
+        let root =
+            std::env::temp_dir().join(format!("herdr-ssh-metadata-target-{}", std::process::id()));
+        let metadata = SshMachineMetadata {
+            os: "linux".into(),
+            executable: "/usr/bin/herdr".into(),
+        };
+        let cache = |name: &str, target: &str, session: &str| SshMetadataCache {
+            path: root.join(format!("{name}.json")),
+            target: target.into(),
+            session: session.into(),
+        };
+        let gone = cache("gone", "hangar-m_gone", "herdr-remote");
+        let gone_other_session = cache("gone2", "hangar-m_gone", "agents");
+        let kept = cache("kept", "hangar-m_kept", "herdr-remote");
+        for entry in [&gone, &gone_other_session, &kept] {
+            entry.store(&metadata);
+        }
+        std::fs::write(root.join("broken.json"), "broken").unwrap();
+        invalidate_target_in(&root, "hangar-m_gone").unwrap();
+        assert!(!gone.path.exists());
+        assert!(!gone_other_session.path.exists());
+        assert_eq!(kept.load(), Some(metadata));
+        assert!(root.join("broken.json").exists());
+        invalidate_target_in(&root.join("missing"), "x").unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

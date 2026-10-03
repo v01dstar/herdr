@@ -69,6 +69,16 @@ impl AddRemoteForm {
         self.machines.iter().find(|machine| machine.id == id)
     }
 
+    /// The selected machine when no Herdr remote uses it, so it can be deleted here.
+    pub(in crate::client::shell) fn deletable(&self) -> Option<&Machine> {
+        match &self.choice {
+            MachineChoice::Existing(id) if self.signed_in && !self.bound.contains(id) => {
+                self.machine(id)
+            }
+            _ => None,
+        }
+    }
+
     pub(in crate::client::shell) fn creating(&self) -> bool {
         self.choice == MachineChoice::New
     }
@@ -207,6 +217,7 @@ impl AddRemoteController {
     }
 }
 
+const UNBOUND_HINT: &str = "No Herdr remote uses it; Delete machine… deletes it instead.";
 const CREATE_HINT: &str = "Creates a hangar machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from Settings → remotes.";
 
 fn bound_machines(server: &str) -> Vec<String> {
@@ -332,11 +343,10 @@ impl ClientShellState {
                         }
                         MachineChoice::Existing(id) => match form.machine(id) {
                             Some(machine) if machine.state == MachineState::Running => {
-                                "Connects to the machine's Herdr session. Its files are kept."
-                                    .into()
+                                format!("Connects to the machine's Herdr session. Its files are kept. {UNBOUND_HINT}")
                             }
                             Some(machine) => format!(
-                                "{} is {}. It is saved without starting it; use Start remote when you need it.",
+                                "{} is {}. It is saved without starting it; use Start remote when you need it. {UNBOUND_HINT}",
                                 machine.name,
                                 machine.state.as_str()
                             ),
@@ -423,6 +433,29 @@ impl ClientShellState {
         });
     }
 
+    /// Delete machine… for a hangar machine that no Herdr remote uses.
+    fn confirm_delete_unbound(&mut self) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+        let LocationDialogKind::Add(form) = &dialog.kind else {
+            return;
+        };
+        let Some(machine) = form.deletable() else {
+            return;
+        };
+        match HangarBinding::new(&form.server, &machine.id, &machine.name) {
+            Ok(binding) => {
+                self.locations.add.cancel_sign_in();
+                self.confirm_delete(DeleteRequest {
+                    binding,
+                    remote: None,
+                });
+            }
+            Err(error) => dialog.message = error,
+        }
+    }
+
     pub(super) fn route_add_remote_key(
         &mut self,
         key: &crate::input::TerminalKey,
@@ -465,6 +498,9 @@ impl ClientShellState {
                 if dialog.selected < NAME_FIELD =>
             {
                 form.open_dropdown(dialog.selected)
+            }
+            KeyCode::Enter if dialog.selected == NAME_FIELD && form.deletable().is_some() => {
+                self.confirm_delete_unbound()
             }
             KeyCode::Enter => self.accept_add_remote(outcome),
             _ => {
@@ -536,6 +572,7 @@ impl ClientShellState {
                     self.select_add_option(field, index - 1000);
                 }
             }
+            Some(NAME_FIELD) if form.deletable().is_some() => self.confirm_delete_unbound(),
             Some(field) => {
                 dialog.selected = field;
                 form.dropdown = None;
@@ -761,6 +798,39 @@ mod tests {
         };
         assert_eq!(signed_out.primary_label(), " sign in ");
         assert!(signed_out.options(1).is_empty());
+    }
+
+    #[test]
+    fn an_unbound_machine_can_be_deleted_after_confirmation() {
+        let mut state = shell_with(form());
+        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
+            if let LocationDialogKind::Add(form) = &mut dialog.kind {
+                form.choice = MachineChoice::Existing(ID.into());
+                form.bound = vec![ID.into()];
+                assert!(
+                    form.deletable().is_none(),
+                    "added machines are removed from remotes"
+                );
+                form.bound.clear();
+            }
+            dialog.selected = NAME_FIELD;
+        }
+        key(&mut state, KeyCode::Enter);
+        let Some(ClientShellOverlay::Locations(dialog)) = &state.overlay else {
+            panic!("dialog");
+        };
+        let LocationDialogKind::Delete(request) = &dialog.kind else {
+            panic!("delete confirmation");
+        };
+        assert_eq!(request.binding.machine_id, ID);
+        assert!(request.remote.is_none());
+        assert!(dialog.message.contains("'box'"));
+        assert!(dialog.message.contains("permanently deleted"));
+        assert!(!state.locations.add.running());
+        assert!(
+            state.locations.job.is_none(),
+            "nothing runs before confirmation"
+        );
     }
 
     #[test]

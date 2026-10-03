@@ -55,7 +55,7 @@ herdr machine add my-box --hangar
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
-herdr machine remove <profile-id>
+herdr machine remove <profile-id> [--delete-machine]
 ```
 
 在交互式终端中，`machine add` 会发现运行中的会话，并在有多个会话运行时让你选择。没有运行中的会话或未安装 Herdr 时使用 `default`；如果查询已安装的二进制文件失败，则需要明确选择。添加 `--remote-session <name>` 可跳过发现。非交互式命令会使用 `default`，除非提供该选项。`machine list` 支持可选的 `--json` 供脚本使用。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。

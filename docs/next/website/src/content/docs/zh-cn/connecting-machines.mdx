@@ -31,9 +31,9 @@ Herdr 会请求 SSH 压缩，以减少受限连接上的屏幕更新流量。这
 
 Herdr 通过 hangar SSH 网关连接机器。它在 state 目录的 `client/hangar/ssh/` 中保存自己的 SSH 密钥和短期证书（4 小时），网关设置只写入临时 SSH 配置，不会修改 `~/.ssh/config`。保存的 SSH 目标是别名 `hangar-<machine ID>`。每次建立新连接前，Herdr 会确认机器正在运行，并在证书剩余时间不足 15 分钟时续期。连接复用保持开启：机器停止时网关会关闭现有连接，因此重连不会复用指向旧 runtime 的连接。
 
-Herdr 不会隐式启动机器。机器停止时，重连、**Test connection**、**New workspace** 和 `herdr --machine` 会提示“use Start remote”。**Machine status** 显示机器状态。**Start remote** 启动机器，等待就绪后启动已保存的 Herdr session。**Stop machine** 需要确认，因为它会停止该机器上的**全部 session 和任务**：先禁用绑定同一机器的 Remote 的自动连接，尝试关闭其 Herdr session，再停止机器。持久磁盘上的文件保留，运行中的进程不会保留。登录过期时显示 **Sign in to hangar**；无权使用的机器显示“not allowed on this server”，不会要求重新登录。
+Herdr 不会隐式启动机器。机器停止时，重连、**Test connection**、**New workspace** 和 `herdr --machine` 会提示“use Start remote”。**Machine status** 显示机器状态。**Start remote** 启动机器，等待就绪后启动已保存的 Herdr session。**Stop machine** 需要确认，因为它会停止该机器上的**全部 session 和任务**：先禁用绑定同一机器的 Remote 的自动连接，尝试关闭其 Herdr session，再停止机器。持久磁盘上的文件保留，运行中的进程不会保留。**Suspend remote** 确认后会禁用绑定同一机器的 Remote 的自动连接，并把机器内存保存为快照；其中的 Herdr session 保持运行，运行中的程序也会保留。挂起的机器显示为 **suspended**，**Start remote** 变为 **Resume remote**；恢复时会还原快照、重新启用自动连接并重连。重连和 **Test connection** 永远不会恢复机器。登录过期时显示 **Sign in to hangar**；无权使用的机器显示“not allowed on this server”，不会要求重新登录。
 
-共享本地 Herdr state 目录的客户端会串行修改 Remote 设置，机器操作由 hangar 服务器串行执行。其他客户端修改连接目标后，需要重新打开弹窗才可操作新目标。移除 profile 只删除本地连接设置，不会删除机器或磁盘。SSH catalog 保持 generation-one 兼容，目录默认值和 hangar 绑定单独保存在 `client/locations.json`。之前通过 Instacloud 集成创建的 Remote 会在升级时被禁用，其 profile 和默认目录会保留，可自行删除。
+共享本地 Herdr state 目录的客户端会串行修改 Remote 设置，机器操作由 hangar 服务器串行执行。其他客户端修改连接目标后，需要重新打开弹窗才可操作新目标。移除 SSH profile 只删除本地连接设置。hangar Remote 会连同机器一起删除：**Remove remote**（在 hangar Remote 上 **Remove profile** 也一样）会先确认，列出机器名和将被移除的 Remote，确认后永久删除机器及其磁盘和快照，并移除绑定该机器的所有 Remote 及其证书和连接缓存。如果 hangar 中机器已被删除，Herdr 只做本地清理；其他失败会保留这些 Remote（保持禁用），便于重试。在终端中，`herdr machine remove <profile-id> --delete-machine` 执行相同操作；不带该参数时会拒绝。未被任何 Remote 使用的 hangar 机器，在 **Add remote** 中选中后会显示 **Delete machine…**。SSH catalog 保持 generation-one 兼容，目录默认值和 hangar 绑定单独保存在 `client/locations.json`。之前通过 Instacloud 集成创建的 Remote 会在升级时被禁用，其 profile 和默认目录会保留，可自行删除。
 
 ## 连接前的准备
 
@@ -96,7 +96,7 @@ herdr machine list
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
-herdr machine remove <profile-id>
+herdr machine remove <profile-id> [--delete-machine]
 ```
 
 用于脚本时，可给 `machine list` 添加 `--json`。

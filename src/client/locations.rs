@@ -354,7 +354,8 @@ pub(super) fn start_session(
     set_service_enabled(profile, options.cloud.as_ref(), true)
 }
 
-/// Explicit Start remote: starts the hangar machine first when the remote has one.
+/// Explicit Start remote (Resume remote when suspended): starts or resumes the hangar
+/// machine first when the remote has one.
 pub(super) fn start_remote(
     profile: &SavedSshEndpoint,
     options: &RemoteOptions,
@@ -411,13 +412,50 @@ pub(super) fn stop_remote(
     }
 }
 
-/// Removes the profile and its binding. The machine and its disk are kept.
+/// Suspend remote: disables automatic connection (so no client fights the gateway
+/// dropping its connections), then snapshots the machine's memory. Unlike Stop machine
+/// the Herdr server is not shut down; its sessions and programs continue after Resume.
+pub(super) fn suspend_remote(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+) -> Result<String, String> {
+    suspend_remote_with(profile, options, hangar::suspend_machine)
+}
+
+fn suspend_remote_with(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+    suspend: impl FnOnce(
+        &HangarBinding,
+        hangar::Progress<'_>,
+    ) -> Result<(), crate::hangar::api::HangarError>,
+) -> Result<String, String> {
+    let cloud = options
+        .cloud
+        .as_ref()
+        .ok_or("Suspend remote requires a hangar machine")?;
+    set_service_enabled(profile, Some(cloud), false)?;
+    suspend(cloud.hangar(), &mut |_| {}).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{}: suspended. Running programs resume with Resume remote.",
+        cloud.hangar().machine_name
+    ))
+}
+
+/// Removes an SSH-only profile and its location metadata. A hangar remote is removed
+/// only together with its machine (`delete_remote`), so this never orphans one.
 pub(super) fn remove_remote(
     profile: &SavedSshEndpoint,
     options: &RemoteOptions,
 ) -> Result<(), String> {
     let _guard = operation_lock()?;
     validate_binding(profile, options.cloud.as_ref())?;
+    if let Some(cloud) = &options.cloud {
+        return Err(format!(
+            "{} is a hangar remote. Removing it deletes the machine; use Remove remote… to confirm.",
+            cloud.hangar().machine_name
+        ));
+    }
     let mut catalog = EndpointCatalog::load()?;
     catalog.remove_ssh(&profile.id);
     catalog.store_profiles()?;
@@ -436,6 +474,219 @@ pub(crate) fn remove_binding(id: &ProfileId) -> Result<(), String> {
         prefs.store()?;
     }
     Ok(())
+}
+
+/// Profiles bound to the same hangar machine as `cloud`.
+pub(crate) fn machine_profiles<'a>(
+    profiles: &'a [SavedSshEndpoint],
+    prefs: &LocationPreferences,
+    cloud: &CloudBinding,
+) -> Vec<&'a SavedSshEndpoint> {
+    profiles
+        .iter()
+        .filter(|profile| {
+            prefs
+                .binding(&profile.id)
+                .is_some_and(|binding| binding.same_machine(cloud))
+        })
+        .collect()
+}
+
+fn quoted_list(labels: &[&str]) -> String {
+    labels
+        .iter()
+        .map(|label| format!("'{label}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What deleting a hangar machine destroys. `labels` are the Herdr remotes that go
+/// away with it.
+pub(crate) fn delete_consequences(labels: &[&str]) -> String {
+    let entries = match labels {
+        [] => "No Herdr remote uses it.".to_owned(),
+        [_] => format!("Herdr also removes the remote {}.", quoted_list(labels)),
+        _ => format!("Herdr also removes the remotes {}.", quoted_list(labels)),
+    };
+    format!(
+        "The machine, its disks and snapshots are permanently deleted, with every file and process on it. This cannot be undone. {entries}"
+    )
+}
+
+/// Confirmation shown before a hangar machine is deleted.
+pub(crate) fn delete_confirmation(machine_name: &str, labels: &[&str]) -> String {
+    format!(
+        "Delete hangar machine '{machine_name}'? {}",
+        delete_consequences(labels)
+    )
+}
+
+/// Deletes the hangar machine behind `profile`, then removes every profile bound to it.
+/// Local entries are removed only after hangar confirms the machine is gone.
+pub(crate) fn delete_remote(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+    progress: hangar::Progress<'_>,
+) -> Result<String, String> {
+    delete_remote_with(
+        profile,
+        options,
+        |other| {
+            crate::remote::stop_saved_ssh(&other.target, &other.session)
+                .map_err(|error| error.to_string())
+        },
+        hangar::delete_machine,
+        progress,
+    )
+}
+
+fn delete_remote_with(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+    stop_session: impl Fn(&SavedSshEndpoint) -> Result<(), String>,
+    delete: impl FnOnce(
+        &HangarBinding,
+        hangar::Progress<'_>,
+    ) -> Result<hangar::Deletion, crate::hangar::api::HangarError>,
+    progress: hangar::Progress<'_>,
+) -> Result<String, String> {
+    let cloud = options
+        .cloud
+        .as_ref()
+        .ok_or("Remove remote requires a hangar machine; use Remove profile")?;
+    // Same fence as Stop machine: no client reconnects to a machine being deleted.
+    set_service_enabled(profile, Some(cloud), false)?;
+    let catalog = EndpointCatalog::load()?;
+    let prefs = LocationPreferences::load()?;
+    for other in machine_profiles(&catalog.ssh, &prefs, cloud) {
+        progress(format!("Stopping Herdr on {}…", other.label));
+        // The machine is deleted next; a session that cannot stop cleanly goes with it.
+        if let Err(error) = stop_session(other) {
+            tracing::debug!(%error, label = %other.label, "graceful stop before delete failed");
+        }
+    }
+    let name = &cloud.hangar().machine_name;
+    let deletion = delete(cloud.hangar(), progress).map_err(|error| {
+        let error = error.to_string();
+        let error = error.trim_end_matches('.');
+        format!(
+            "Could not delete '{name}': {error}. Nothing was removed from Herdr; remotes for '{name}' stay disabled. Retry Remove remote…, or use Start remote to keep using it."
+        )
+    })?;
+    let removed = remove_machine_profiles(cloud).map_err(|error| {
+        format!("hangar machine '{name}' was deleted, but its Herdr remotes were not removed: {error}. Remove them with Remove remote… again.")
+    })?;
+    forget_machine_files(cloud.hangar());
+    let removed = removed.iter().map(String::as_str).collect::<Vec<_>>();
+    let entries = if removed.is_empty() {
+        String::new()
+    } else {
+        format!(" Removed {} from Herdr.", quoted_list(&removed))
+    };
+    Ok(match deletion {
+        hangar::Deletion::Deleted => format!("Deleted hangar machine '{name}'.{entries}"),
+        hangar::Deletion::AlreadyGone => {
+            format!("hangar machine '{name}' was already deleted.{entries}")
+        }
+    })
+}
+
+/// Removes every profile and location entry bound to `cloud`'s machine. Returns the
+/// removed profile labels.
+fn remove_machine_profiles(cloud: &CloudBinding) -> Result<Vec<String>, String> {
+    let _guard = operation_lock()?;
+    let mut catalog = EndpointCatalog::load()?;
+    let mut prefs = LocationPreferences::load()?;
+    let removed = machine_profiles(&catalog.ssh, &prefs, cloud)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let selection = catalog.selected_profile.clone();
+    for profile in &removed {
+        catalog.remove_ssh(&profile.id);
+    }
+    // Profiles first: a profile never appears without its binding.
+    catalog.store_profiles()?;
+    if catalog.selected_profile != selection {
+        if let Err(error) = catalog.store_selection() {
+            tracing::warn!(%error, "could not clear the selection of a removed remote");
+        }
+    }
+    let stale = prefs
+        .remotes
+        .iter()
+        .filter(|(_, options)| {
+            options
+                .cloud
+                .as_ref()
+                .is_some_and(|binding| binding.same_machine(cloud))
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in &stale {
+        prefs.remotes.remove(id);
+    }
+    if prefs
+        .default_profile
+        .as_ref()
+        .is_some_and(|id| stale.contains(id))
+    {
+        prefs.default_profile = None;
+    }
+    prefs.store()?;
+    Ok(removed.into_iter().map(|profile| profile.label).collect())
+}
+
+/// Local files that exist only for a machine hangar no longer has: its certificate,
+/// cached SSH metadata for its alias, and leftover shared control sockets. The shared
+/// key and `known_hosts` stay. Best effort: a leftover file is harmless.
+pub(crate) fn forget_machine_files(binding: &HangarBinding) {
+    if let Err(error) = crate::hangar::certs::forget_machine(
+        &crate::hangar::certs::SshPaths::herdr(),
+        &binding.machine_id,
+    ) {
+        tracing::warn!(%error, "could not remove the certificate of a deleted hangar machine");
+    }
+    super::endpoint::invalidate_ssh_metadata_target(&binding.alias);
+    if let Err(error) = crate::platform::remove_shared_ssh_control_sockets(
+        &crate::config::config_path(),
+        &binding.alias,
+    ) {
+        tracing::debug!(%error, "could not remove control sockets of a deleted hangar machine");
+    }
+}
+
+/// Deletes a hangar machine that no Herdr remote uses (an orphan left by an older
+/// Herdr or another client).
+pub(crate) fn delete_unbound_machine(
+    binding: &HangarBinding,
+    progress: hangar::Progress<'_>,
+) -> Result<String, String> {
+    let cloud = CloudBinding::Hangar(binding.clone());
+    {
+        let _guard = operation_lock()?;
+        let prefs = LocationPreferences::load()?;
+        if prefs
+            .remotes
+            .values()
+            .filter_map(|options| options.cloud.as_ref())
+            .any(|other| other.same_machine(&cloud))
+        {
+            return Err(format!(
+                "'{}' is now used by a Herdr remote. Remove it from Settings → remotes → Remove remote….",
+                binding.machine_name
+            ));
+        }
+    }
+    let name = &binding.machine_name;
+    let deletion = hangar::delete_machine(binding, progress).map_err(|error| error.to_string())?;
+    forget_machine_files(binding);
+    match deletion {
+        hangar::Deletion::Deleted => Ok(format!("Deleted hangar machine '{name}'.")),
+        hangar::Deletion::AlreadyGone => {
+            Ok(format!("hangar machine '{name}' was already deleted."))
+        }
+    }
 }
 
 pub(super) fn create_workspace(
@@ -613,6 +864,268 @@ mod tests {
         .unwrap();
         assert!(none.is_empty());
         assert!(quiet.notice.is_none());
+    }
+
+    /// Runs `f` with a private state directory holding two profiles bound to the
+    /// machine `ID`, one bound to another machine, and one SSH-only profile.
+    fn with_remotes<T>(name: &str, f: impl FnOnce(&[SavedSshEndpoint]) -> T) -> T {
+        let _guard = crate::config::test_config_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let old = std::env::var_os("XDG_STATE_HOME");
+        let base =
+            std::env::temp_dir().join(format!("herdr-delete-remote-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("XDG_STATE_HOME", &base);
+        let other = CloudBinding::Hangar(
+            HangarBinding::new(
+                "https://hangar.test",
+                "m_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "other",
+            )
+            .unwrap(),
+        );
+        let alias = crate::hangar::binding::alias_for(ID);
+        let profiles = vec![
+            SavedSshEndpoint::new("box", &alias, "herdr-remote").unwrap(),
+            SavedSshEndpoint::new("box (2)", &alias, "agents").unwrap(),
+            SavedSshEndpoint::new(
+                "other",
+                "hangar-m_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "herdr-remote",
+            )
+            .unwrap(),
+            SavedSshEndpoint::new("plain", "workbox", "default").unwrap(),
+        ];
+        let mut catalog = EndpointCatalog::default();
+        catalog.ssh = profiles.clone();
+        catalog.store_profiles().unwrap();
+        let mut prefs = LocationPreferences {
+            default_profile: Some(profiles[1].id.clone()),
+            ..Default::default()
+        };
+        for (profile, cloud) in
+            profiles
+                .iter()
+                .zip([Some(hangar()), Some(hangar()), Some(other), None])
+        {
+            prefs.remotes.insert(
+                profile.id.clone(),
+                RemoteOptions {
+                    cwd: String::new(),
+                    cloud,
+                },
+            );
+        }
+        prefs.store().unwrap();
+        // Per-machine files written while the remotes were used.
+        let ssh = crate::hangar::certs::SshPaths::herdr();
+        std::fs::create_dir_all(ssh.key().parent().unwrap()).unwrap();
+        std::fs::write(ssh.key(), "private").unwrap();
+        std::fs::write(ssh.known_hosts(), "@cert-authority gateway").unwrap();
+        for id in [ID, "m_bbbbbbbbbbbbbbbbbbbbbbbbbb"] {
+            std::fs::write(ssh.cert(id), "cert").unwrap();
+            std::fs::write(ssh.key().with_file_name(format!("{id}-cert.json")), "{}").unwrap();
+        }
+        let metadata = crate::client::endpoint::SshMachineMetadata {
+            os: "linux".into(),
+            executable: "/usr/bin/herdr".into(),
+        };
+        for profile in &profiles {
+            crate::client::endpoint::SshMetadataCache::new(
+                profile.id.as_str(),
+                &profile.target,
+                &profile.session,
+            )
+            .unwrap()
+            .store(&metadata);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&profiles)));
+        match old {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    fn delete_via(
+        http: &std::sync::Arc<crate::hangar::api::fake::FakeHttp>,
+        profile: &SavedSshEndpoint,
+        stopped: &std::cell::RefCell<Vec<String>>,
+    ) -> Result<String, String> {
+        let client = crate::hangar::api::fake::client(http);
+        let options = LocationPreferences::load().unwrap().remotes[&profile.id].clone();
+        delete_remote_with(
+            profile,
+            &options,
+            |other| {
+                stopped.borrow_mut().push(other.label.clone());
+                Ok(())
+            },
+            |binding, progress| hangar::delete_with(&client, &binding.machine_id, progress),
+            &mut |_| {},
+        )
+    }
+
+    /// Which per-machine files remain: (certificate, certificate record, metadata).
+    fn machine_files(id: &str, profiles: &[&SavedSshEndpoint]) -> (bool, bool, bool) {
+        let ssh = crate::hangar::certs::SshPaths::herdr();
+        assert!(ssh.key().exists() && ssh.known_hosts().exists());
+        let metadata = profiles.iter().any(|profile| {
+            crate::config::state_dir()
+                .join("client/ssh-metadata")
+                .join(format!("{}.json", profile.id))
+                .exists()
+        });
+        (
+            ssh.cert(id).exists(),
+            ssh.key().with_file_name(format!("{id}-cert.json")).exists(),
+            metadata,
+        )
+    }
+
+    fn labels() -> Vec<String> {
+        EndpointCatalog::load_profiles()
+            .unwrap()
+            .into_iter()
+            .map(|profile| profile.label)
+            .collect()
+    }
+
+    #[test]
+    fn confirmation_names_the_machine_permanent_deletion_and_removed_remotes() {
+        let text = delete_confirmation("box", &["box", "box (2)"]);
+        assert!(text.contains("'box'"));
+        assert!(text.contains("disks and snapshots are permanently deleted"));
+        assert!(text.contains("cannot be undone"));
+        assert!(text.contains("remotes 'box', 'box (2)'"));
+        assert!(delete_confirmation("orphan", &[]).contains("No Herdr remote uses it"));
+    }
+
+    #[test]
+    fn deleting_a_machine_removes_every_profile_and_binding_for_it() {
+        with_remotes("success", |profiles| {
+            use crate::hangar::api::fake::*;
+            let http = FakeHttp::new();
+            http.reply(202, operation("op_1", "delete", "running"))
+                .reply(200, operation("op_1", "delete", "succeeded"));
+            let stopped = std::cell::RefCell::new(Vec::new());
+            let message = delete_via(&http, &profiles[0], &stopped).unwrap();
+            assert!(
+                message.contains("Deleted hangar machine 'box'"),
+                "{message}"
+            );
+            assert!(message.contains("'box (2)'"), "{message}");
+            assert_eq!(*stopped.borrow(), ["box", "box (2)"]);
+            let sent = http.sent();
+            assert_eq!(sent[0].method, "DELETE");
+            assert!(sent[0].url.ends_with(&format!("/v1/machines/{ID}")));
+            assert!(sent[0].idempotency_key.is_some());
+            assert_eq!(labels(), ["other", "plain"]);
+            let prefs = LocationPreferences::load().unwrap();
+            assert!(prefs.remotes.values().all(|options| options
+                .cloud
+                .as_ref()
+                .is_none_or(|cloud| !cloud.same_machine(&hangar()))));
+            assert_eq!(prefs.remotes.len(), 2);
+            assert_eq!(prefs.default_profile, None);
+            assert_eq!(
+                machine_files(ID, &[&profiles[0], &profiles[1]]),
+                (false, false, false)
+            );
+            assert_eq!(
+                machine_files("m_bbbbbbbbbbbbbbbbbbbbbbbbbb", &[&profiles[2]]),
+                (true, true, true)
+            );
+        });
+    }
+
+    #[test]
+    fn a_machine_already_gone_from_hangar_is_cleaned_up_locally() {
+        with_remotes("gone", |profiles| {
+            use crate::hangar::api::fake::*;
+            let http = FakeHttp::new();
+            http.error(404, "not_found").error(404, "not_found");
+            let stopped = std::cell::RefCell::new(Vec::new());
+            let message = delete_via(&http, &profiles[1], &stopped).unwrap();
+            assert!(message.contains("already deleted"), "{message}");
+            assert_eq!(labels(), ["other", "plain"]);
+            assert_eq!(
+                http.paths(),
+                [
+                    format!("DELETE /v1/machines/{ID}"),
+                    format!("GET /v1/machines/{ID}")
+                ]
+            );
+            assert_eq!(
+                machine_files(ID, &[&profiles[0], &profiles[1]]),
+                (false, false, false)
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_delete_keeps_every_local_entry() {
+        with_remotes("failed", |profiles| {
+            use crate::hangar::api::fake::*;
+            let http = FakeHttp::new();
+            http.error(500, "internal");
+            let stopped = std::cell::RefCell::new(Vec::new());
+            let error = delete_via(&http, &profiles[0], &stopped).unwrap_err();
+            assert!(error.contains("Nothing was removed from Herdr"), "{error}");
+            assert_eq!(labels(), ["box", "box (2)", "other", "plain"]);
+            let prefs = LocationPreferences::load().unwrap();
+            assert_eq!(prefs.binding(&profiles[0].id), Some(&hangar()));
+            assert_eq!(prefs.binding(&profiles[1].id), Some(&hangar()));
+            assert_eq!(prefs.default_profile.as_ref(), Some(&profiles[1].id));
+            // Like Stop machine, the remotes stay disabled until Start remote.
+            assert!(EndpointCatalog::load_profiles()
+                .unwrap()
+                .iter()
+                .filter(|profile| profile.label.starts_with("box"))
+                .all(|profile| !profile.enabled));
+            assert_eq!(
+                machine_files(ID, &[&profiles[0], &profiles[1]]),
+                (true, true, true)
+            );
+        });
+    }
+
+    #[test]
+    fn suspend_disables_every_bound_remote_before_suspending() {
+        with_remotes("suspend", |profiles| {
+            use crate::hangar::api::fake::*;
+            let http = FakeHttp::new();
+            http.reply(202, operation("op_1", "suspend", "succeeded"));
+            let client = client(&http);
+            let options = LocationPreferences::load().unwrap().remotes[&profiles[0].id].clone();
+            let message = suspend_remote_with(&profiles[0], &options, |binding, progress| {
+                // The fence is persisted before hangar is asked to suspend.
+                assert!(EndpointCatalog::load_profiles()
+                    .unwrap()
+                    .iter()
+                    .filter(|profile| profile.label.starts_with("box"))
+                    .all(|profile| !profile.enabled));
+                hangar::suspend_with(&client, &binding.machine_id, progress)
+            })
+            .unwrap();
+            assert!(message.contains("suspended"));
+            assert_eq!(http.paths(), [format!("POST /v1/machines/{ID}/suspend")]);
+            assert_eq!(labels().len(), 4, "suspend never removes remotes");
+        });
+    }
+
+    #[test]
+    fn remove_profile_never_orphans_a_hangar_machine() {
+        with_remotes("remove-profile", |profiles| {
+            let prefs = LocationPreferences::load().unwrap();
+            let error = remove_remote(&profiles[0], &prefs.remotes[&profiles[0].id]).unwrap_err();
+            assert!(error.contains("Remove remote"), "{error}");
+            assert_eq!(labels().len(), 4);
+            remove_remote(&profiles[3], &prefs.remotes[&profiles[3].id]).unwrap();
+            assert_eq!(labels(), ["box", "box (2)", "other"]);
+        });
     }
 
     #[test]

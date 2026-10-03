@@ -14,19 +14,21 @@ const HELP: &str = "Usage:
   herdr machine add <ssh-target> [--label <label>] [--remote-session <name>]
   herdr machine add <hangar-machine> --hangar [--label <label>] [--remote-session <name>]
   herdr machine rename <profile-id> --label <label>
-  herdr machine remove <profile-id>
+  herdr machine remove <profile-id> [--delete-machine]
   herdr machine enable <profile-id>
   herdr machine disable <profile-id>
 
 Add prepares the remote Herdr installation and starts its server before saving.
 Missing or incompatible installations require approval in an interactive terminal.
 Changes apply automatically to open local Herdr clients.
-Removing or disabling a machine leaves its remote sessions running.
+Removing or disabling an SSH machine leaves its remote sessions running.
 Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
 SSH credentials and key material remain owned by OpenSSH.
 With --hangar, the machine is reached through the hangar gateway with short-lived
 certificates, using the sign-in shared with the hangar CLI. Stopped machines are
-saved disabled and never started.";
+saved disabled and never started. Removing a hangar machine deletes it in hangar,
+with its disks and snapshots, and removes every saved machine bound to it; this
+cannot be undone, so it requires --delete-machine.";
 
 #[derive(Serialize)]
 struct MachineListRow<'a> {
@@ -583,11 +585,82 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+const REMOVE_USAGE: &str = "usage: herdr machine remove <profile-id> [--delete-machine]";
+
+/// Splits `--delete-machine` from the profile ID argument.
+fn parse_remove_args(args: &[String]) -> (Vec<String>, bool) {
+    let delete_machine = args.iter().any(|arg| arg == "--delete-machine");
+    let rest = args
+        .iter()
+        .filter(|arg| *arg != "--delete-machine")
+        .cloned()
+        .collect::<Vec<_>>();
+    (rest, delete_machine)
+}
+
+/// A CLI cannot show the confirmation dialog, so deleting a hangar machine needs the
+/// explicit flag, and the flag is refused where there is no machine to delete.
+fn check_remove(
+    cloud: Option<&crate::client::locations::CloudBinding>,
+    bound_labels: &[&str],
+    delete_machine: bool,
+) -> Result<(), String> {
+    match (cloud, delete_machine) {
+        (Some(cloud), false) => Err(format!(
+            "this machine is bound to hangar machine '{}'. Removing it deletes that machine. {} Pass --delete-machine to confirm, or use Settings → remotes → Remove remote….",
+            cloud.hangar().machine_name,
+            crate::client::locations::delete_consequences(bound_labels)
+        )),
+        (None, true) => Err(
+            "--delete-machine applies only to hangar machines; this is an SSH machine".into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn remove(args: &[String]) -> std::io::Result<i32> {
-    let Some(id) = one_profile_id(args, "usage: herdr machine remove <profile-id>")? else {
+    let (args, delete_machine) = parse_remove_args(args);
+    let Some(id) = one_profile_id(&args, REMOVE_USAGE)? else {
         return Ok(2);
     };
     let mut catalog = load_catalog()?;
+    let prefs =
+        crate::client::locations::LocationPreferences::load().map_err(std::io::Error::other)?;
+    let cloud = prefs.binding(&id).cloned();
+    let bound = cloud
+        .as_ref()
+        .map(|cloud| crate::client::locations::machine_profiles(&catalog.ssh, &prefs, cloud))
+        .unwrap_or_default();
+    let labels = bound
+        .iter()
+        .map(|profile| profile.label.as_str())
+        .collect::<Vec<_>>();
+    if catalog.ssh.iter().any(|profile| profile.id == id) {
+        if let Err(error) = check_remove(cloud.as_ref(), &labels, delete_machine) {
+            eprintln!("error: {error}");
+            return Ok(2);
+        }
+    }
+    if let (Some(profile), Some(options)) = (
+        catalog.ssh.iter().find(|profile| profile.id == id),
+        prefs
+            .remotes
+            .get(&id)
+            .filter(|options| options.cloud.is_some()),
+    ) {
+        return match crate::client::locations::delete_remote(profile, options, &mut |step| {
+            eprintln!("{step}")
+        }) {
+            Ok(message) => {
+                println!("{message}");
+                Ok(0)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                Ok(1)
+            }
+        };
+    }
     let previous_selection = catalog.selected_profile.clone();
     let metadata_cache = catalog
         .ssh
@@ -776,6 +849,28 @@ mod tests {
             let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
             assert!(parse_add_args(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn removing_a_hangar_machine_requires_the_delete_flag() {
+        use crate::client::locations::CloudBinding;
+        use crate::hangar::binding::HangarBinding;
+        let cloud = CloudBinding::Hangar(
+            HangarBinding::new("https://hangar.test", "m_agqp6jaaa6kqkitog6zzqzdfhy", "box")
+                .unwrap(),
+        );
+        let refused = check_remove(Some(&cloud), &["box"], false).unwrap_err();
+        assert!(refused.contains("--delete-machine"), "{refused}");
+        assert!(refused.contains("'box'"), "{refused}");
+        assert!(refused.contains("permanently deleted"), "{refused}");
+        assert!(check_remove(Some(&cloud), &["box"], true).is_ok());
+        assert!(check_remove(None, &[], false).is_ok());
+        assert!(check_remove(None, &[], true)
+            .unwrap_err()
+            .contains("only to hangar"));
+        let (rest, flag) = parse_remove_args(&["--delete-machine".into(), "abc".into()]);
+        assert!(flag);
+        assert_eq!(rest, ["abc"]);
     }
 
     #[test]

@@ -194,6 +194,18 @@ mod tests {
     }
 
     #[test]
+    fn suspended_machine_is_never_resumed_by_a_connection() {
+        let paths = paths_with_key("suspended");
+        let http = FakeHttp::new();
+        http.reply(200, machine(ID, "suspended", false));
+        let error =
+            prepare_with(&binding(), &client(&http), &paths, SystemTime::now()).unwrap_err();
+        assert!(error.to_string().contains("use Resume remote"), "{error}");
+        assert_eq!(error.into_io().kind(), io::ErrorKind::NotConnected);
+        assert_eq!(http.paths(), [format!("GET /v1/machines/{ID}")]);
+    }
+
+    #[test]
     fn running_machine_yields_a_host_block_for_its_alias() {
         let paths = paths_with_key("running");
         let http = FakeHttp::new();

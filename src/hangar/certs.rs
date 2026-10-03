@@ -277,6 +277,23 @@ pub(crate) fn ensure_cert(
     Ok(meta)
 }
 
+/// Drops the certificate and its record for a deleted machine. The shared key and
+/// `known_hosts` (the gateway's host CA) stay for other machines.
+pub(crate) fn forget_machine(paths: &SshPaths, machine_id: &str) -> std::io::Result<()> {
+    if !std::fs::exists(&paths.dir)? {
+        return Ok(());
+    }
+    let _lock = super::auth::lock_file(&paths.lock())?;
+    for path in [paths.cert(machine_id), paths.meta(machine_id)] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn config_path(path: &Path) -> Result<String, HangarError> {
     let text = path.to_string_lossy();
     if text.contains('"') || text.chars().any(char::is_control) {
@@ -376,6 +393,26 @@ pub(crate) mod tests {
         );
         // A certificate from another server is never reused.
         assert!(cached(&paths, "https://other", "m_x", at("2026-10-02T16:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn forgetting_a_machine_keeps_the_shared_key_and_other_certificates() {
+        let paths = paths_with_key("forget");
+        std::fs::write(paths.known_hosts(), "@cert-authority gateway\n").unwrap();
+        for id in ["m_gone", "m_kept"] {
+            std::fs::write(paths.cert(id), "cert").unwrap();
+            std::fs::write(paths.meta(id), "{}").unwrap();
+        }
+        forget_machine(&paths, "m_gone").unwrap();
+        assert!(!paths.cert("m_gone").exists());
+        assert!(!paths.meta("m_gone").exists());
+        assert!(paths.cert("m_kept").exists());
+        assert!(paths.meta("m_kept").exists());
+        assert!(paths.key().exists());
+        assert!(paths.public_key().exists());
+        assert!(paths.known_hosts().exists());
+        forget_machine(&paths, "m_gone").unwrap();
+        forget_machine(&SshPaths::at(paths.dir.join("missing")), "m_gone").unwrap();
     }
 
     #[test]

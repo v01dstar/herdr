@@ -82,7 +82,8 @@ impl ChildExitReason {
 
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    classify_child_exit, poll_fd_readable, read_fd, shared_ssh_control_path,
+    classify_child_exit, poll_fd_readable, read_fd, remove_shared_ssh_control_sockets,
+    shared_ssh_control_path,
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -715,6 +716,15 @@ mod tests {
             LimitedRead::Complete(b"image".to_vec())
         );
     }
+}
+
+/// No shared OpenSSH control sockets exist without Unix multiplexing.
+#[cfg(not(unix))]
+pub(crate) fn remove_shared_ssh_control_sockets(
+    _namespace: &std::path::Path,
+    _target: &str,
+) -> std::io::Result<usize> {
+    Ok(0)
 }
 
 #[cfg(not(unix))]

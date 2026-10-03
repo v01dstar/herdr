@@ -147,6 +147,57 @@ pub(crate) fn stop_with(
     mutate(client, |key| client.stop_machine(key, machine_id), progress).map(|_| ())
 }
 
+/// Keeps memory (running programs) in a snapshot; Start remote resumes it.
+pub(crate) fn suspend_with(
+    client: &Client,
+    machine_id: &str,
+    progress: Progress<'_>,
+) -> Result<(), HangarError> {
+    progress("Suspending the hangar machine…".into());
+    mutate(
+        client,
+        |key| client.suspend_machine(key, machine_id),
+        progress,
+    )
+    .map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Deletion {
+    Deleted,
+    /// hangar no longer has the machine (deleted elsewhere or never visible).
+    AlreadyGone,
+}
+
+/// Deletes the machine, its disks and snapshots, and waits for the operation. A
+/// `not_found` anywhere counts as already deleted only when the machine itself is
+/// confirmed missing, so a vanished operation record is not mistaken for success.
+pub(crate) fn delete_with(
+    client: &Client,
+    machine_id: &str,
+    progress: Progress<'_>,
+) -> Result<Deletion, HangarError> {
+    progress("Deleting the hangar machine…".into());
+    match mutate(
+        client,
+        |key| client.delete_machine(key, machine_id),
+        progress,
+    ) {
+        Ok(_) => Ok(Deletion::Deleted),
+        Err(error) if error.code() == Some(&ErrorCode::NotFound) => {
+            match client.machine(machine_id) {
+                Err(missing) if missing.code() == Some(&ErrorCode::NotFound) => {
+                    Ok(Deletion::AlreadyGone)
+                }
+                Ok(machine) if machine.state == MachineState::Deleted => Ok(Deletion::AlreadyGone),
+                Ok(_) => Err(error),
+                Err(other) => Err(other),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn create_with(
     client: &Client,
     name: &str,
@@ -206,6 +257,36 @@ pub(crate) fn stop_machine(
     progress: Progress<'_>,
 ) -> Result<(), HangarError> {
     stop_with(
+        &hangar_client(&binding.server)?,
+        &binding.machine_id,
+        progress,
+    )
+}
+
+pub(crate) fn suspend_machine(
+    binding: &HangarBinding,
+    progress: Progress<'_>,
+) -> Result<(), HangarError> {
+    suspend_with(
+        &hangar_client(&binding.server)?,
+        &binding.machine_id,
+        progress,
+    )
+}
+
+/// Current states of the given machines on `server`, for labels such as Resume remote.
+pub(crate) fn machine_states(server: &str) -> Result<Vec<(String, MachineState)>, HangarError> {
+    Ok(list_machines(server)?
+        .into_iter()
+        .map(|machine| (machine.id, machine.state))
+        .collect())
+}
+
+pub(crate) fn delete_machine(
+    binding: &HangarBinding,
+    progress: Progress<'_>,
+) -> Result<Deletion, HangarError> {
+    delete_with(
         &hangar_client(&binding.server)?,
         &binding.machine_id,
         progress,
@@ -435,6 +516,74 @@ mod tests {
         let machine = create_with(&client(&http), "box", &mut |step| steps.push(step)).unwrap();
         assert_eq!(machine.id, ID);
         assert!(steps.iter().any(|step| step.contains("ready")));
+    }
+
+    #[test]
+    fn suspend_is_sent_once_and_polled_and_start_resumes_a_suspended_machine() {
+        let http = FakeHttp::new();
+        http.reply(202, operation("op_1", "suspend", "running"))
+            .reply(200, operation("op_1", "suspend", "succeeded"));
+        suspend_with(&client(&http), ID, &mut |_| {}).unwrap();
+        assert_eq!(
+            http.paths(),
+            [
+                format!("POST /v1/machines/{ID}/suspend"),
+                "GET /v1/operations/op_1".to_owned()
+            ]
+        );
+        assert!(http.sent()[0].idempotency_key.is_some());
+        // Resume is an explicit start; it waits until the guest is ready again.
+        let http = FakeHttp::new();
+        http.reply(202, operation("op_2", "start", "succeeded"))
+            .reply(200, machine(ID, "resuming", false))
+            .reply(200, machine(ID, "running", true));
+        assert!(
+            start_with(&client(&http), ID, &mut |_| {})
+                .unwrap()
+                .runtime
+                .ready
+        );
+        assert_eq!(http.paths()[0], format!("POST /v1/machines/{ID}/start"));
+    }
+
+    #[test]
+    fn delete_is_sent_once_with_a_key_and_polled_to_completion() {
+        let http = FakeHttp::new();
+        http.reply(202, operation("op_1", "delete", "queued"))
+            .reply(200, operation("op_1", "delete", "succeeded"));
+        assert_eq!(
+            delete_with(&client(&http), ID, &mut |_| {}).unwrap(),
+            Deletion::Deleted
+        );
+        assert_eq!(
+            http.paths(),
+            [
+                format!("DELETE /v1/machines/{ID}"),
+                "GET /v1/operations/op_1".to_owned()
+            ]
+        );
+        assert!(http.sent()[0].idempotency_key.is_some());
+    }
+
+    #[test]
+    fn not_found_counts_as_deleted_only_when_the_machine_is_missing() {
+        let http = FakeHttp::new();
+        http.error(404, "not_found").error(404, "not_found");
+        assert_eq!(
+            delete_with(&client(&http), ID, &mut |_| {}).unwrap(),
+            Deletion::AlreadyGone
+        );
+        // The operation record vanished, but the machine still exists.
+        let http = FakeHttp::new();
+        http.reply(202, operation("op_1", "delete", "running"))
+            .error(404, "not_found")
+            .reply(200, machine(ID, "deleting", false));
+        let error = delete_with(&client(&http), ID, &mut |_| {}).unwrap_err();
+        assert_eq!(error.code(), Some(&ErrorCode::NotFound));
+        // Other failures are reported, never treated as deleted.
+        let http = FakeHttp::new();
+        http.error(403, "permission_denied");
+        assert!(delete_with(&client(&http), ID, &mut |_| {}).is_err());
     }
 
     #[test]

@@ -502,11 +502,7 @@ mod tests {
 /// Shared OpenSSH sockets outlive individual helpers. Never adopt a directory
 /// belonging to another uid, a symlink, or a directory accessible by others.
 pub(crate) fn shared_ssh_control_path(namespace: &Path, target: &str) -> std::io::Result<PathBuf> {
-    use sha2::{Digest, Sha256};
-    use std::os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt},
-    };
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
     // Validate the resolved system temp directory, but retain the short /tmp
     // spelling for sockets. On macOS /tmp resolves to /private/tmp; those extra
@@ -520,27 +516,20 @@ pub(crate) fn shared_ssh_control_path(namespace: &Path, target: &str) -> std::io
             "unsafe SSH control directory parent",
         ));
     }
-    let dir = base.join(format!("hssh-{}", unsafe { libc::geteuid() }));
+    let dir = shared_ssh_control_dir(base);
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
     validate_shared_ssh_dir(&dir)?;
-    let namespace = if namespace.is_absolute() {
-        namespace.to_owned()
-    } else {
-        std::env::current_dir()?.join(namespace)
-    };
-    let mut hash = Sha256::new();
-    hash.update(namespace.as_os_str().as_bytes());
-    hash.update([0]);
-    hash.update(target.as_bytes());
     // %C additionally scopes the socket to OpenSSH's resolved destination,
     // port and jump host, rather than merely the spelling of an alias.
     // Keep 96 bits of namespace/target hash plus OpenSSH's 160-bit %C.
-    let hash = format!("{:x}", hash.finalize());
-    let path = dir.join(format!("{}-%C", &hash[..24]));
+    let path = dir.join(format!(
+        "{}-%C",
+        shared_ssh_control_prefix(namespace, target)?
+    ));
     // OpenSSH first binds ControlPath + '.' + 16 random characters, then
     // renames it. Reserve those 17 bytes, not just the final socket's length.
     let expanded = path.to_string_lossy().replace("%C", &"0".repeat(40));
@@ -552,6 +541,64 @@ pub(crate) fn shared_ssh_control_path(namespace: &Path, target: &str) -> std::io
         ));
     }
     Ok(path)
+}
+
+fn shared_ssh_control_dir(base: &Path) -> PathBuf {
+    base.join(format!("hssh-{}", unsafe { libc::geteuid() }))
+}
+
+fn shared_ssh_control_prefix(namespace: &Path, target: &str) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    let namespace = if namespace.is_absolute() {
+        namespace.to_owned()
+    } else {
+        std::env::current_dir()?.join(namespace)
+    };
+    let mut hash = Sha256::new();
+    hash.update(namespace.as_os_str().as_bytes());
+    hash.update([0]);
+    hash.update(target.as_bytes());
+    let hash = format!("{:x}", hash.finalize());
+    Ok(hash[..24].to_owned())
+}
+
+/// Unlinks leftover shared control sockets for `target` (every `%C` expansion). Used
+/// only after the destination itself is gone, so no live master can still need them.
+/// Returns how many sockets were removed.
+pub(crate) fn remove_shared_ssh_control_sockets(
+    namespace: &Path,
+    target: &str,
+) -> std::io::Result<usize> {
+    remove_shared_ssh_control_sockets_in(
+        &shared_ssh_control_dir(Path::new("/tmp")),
+        namespace,
+        target,
+    )
+}
+
+fn remove_shared_ssh_control_sockets_in(
+    dir: &Path,
+    namespace: &Path,
+    target: &str,
+) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileTypeExt;
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => validate_shared_ssh_dir(dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    }
+    let prefix = format!("{}-", shared_ssh_control_prefix(namespace, target)?);
+    let mut removed = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let matches = entry.file_name().to_string_lossy().starts_with(&prefix);
+        if matches && entry.file_type()?.is_socket() {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn validate_shared_ssh_dir(dir: &Path) -> std::io::Result<()> {
@@ -595,6 +642,36 @@ mod shared_ssh_tests {
             "{expanded}.QuuYe7ZFE2HYeAE4"
         ))));
         validate_shared_ssh_dir(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn removing_control_sockets_matches_only_the_target_sockets() {
+        use std::os::unix::fs::DirBuilderExt;
+        // Short base: Unix socket paths are limited to about 100 bytes.
+        let dir = Path::new("/tmp").join(format!("hrt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let namespace = Path::new("/config/one");
+        let prefix = shared_ssh_control_prefix(namespace, "hangar-m_gone").unwrap();
+        let other = shared_ssh_control_prefix(namespace, "hangar-m_kept").unwrap();
+        let gone = dir.join(format!("{prefix}-{}", "a".repeat(40)));
+        let kept = dir.join(format!("{other}-{}", "b".repeat(40)));
+        let plain = dir.join(format!("{prefix}-notes"));
+        let _gone = std::os::unix::net::UnixListener::bind(&gone).unwrap();
+        let _kept = std::os::unix::net::UnixListener::bind(&kept).unwrap();
+        std::fs::write(&plain, "not a socket").unwrap();
+        assert_eq!(
+            remove_shared_ssh_control_sockets_in(&dir, namespace, "hangar-m_gone").unwrap(),
+            1
+        );
+        assert!(!gone.exists());
+        assert!(kept.exists());
+        assert!(plain.exists());
+        assert_eq!(
+            remove_shared_ssh_control_sockets_in(&dir.join("missing"), namespace, "x").unwrap(),
+            0
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

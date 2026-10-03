@@ -31,9 +31,9 @@ Local または Remote を選び、**Use as default** で新規作成先を設�
 
 Herdr は hangar の SSH ゲートウェイ経由でマシンに接続します。専用の SSH 鍵と短期証明書（4 時間）を state ディレクトリの `client/hangar/ssh/` に保持し、ゲートウェイの設定は一時的な SSH 設定にだけ書き込みます。`~/.ssh/config` は変更しません。保存される SSH ターゲットは `hangar-<machine ID>` というエイリアスです。新しい接続の前に、マシンが起動中であることを確認し、証明書の残り時間が 15 分を切っていれば更新します。接続共有は有効のままです。マシン停止時にゲートウェイが既存接続を閉じるため、再接続で古い runtime への接続を再利用することはありません。
 
-Herdr がマシンを暗黙に起動することはありません。マシンが停止中の場合、再接続、**Test connection**、**New workspace**、`herdr --machine` は「use Start remote」というエラーになります。**Machine status** はマシンの状態を表示します。**Start remote** はマシンを起動し、準備完了を待ってから保存済みの Herdr session を起動します。**Stop machine** はそのマシン上の**全 session とジョブ**を停止するため、確認を求めます。同じマシンに紐づく Remote の自動接続を無効化し、それらの Herdr session の終了を試みてからマシンを停止します。永続ディスクのファイルは残りますが、実行中のプロセスは残りません。サインインの期限が切れると **Sign in to hangar** と表示されます。利用が許可されていないマシンでは「not allowed on this server」と表示され、再サインインは求めません。
+Herdr がマシンを暗黙に起動することはありません。マシンが停止中の場合、再接続、**Test connection**、**New workspace**、`herdr --machine` は「use Start remote」というエラーになります。**Machine status** はマシンの状態を表示します。**Start remote** はマシンを起動し、準備完了を待ってから保存済みの Herdr session を起動します。**Stop machine** はそのマシン上の**全 session とジョブ**を停止するため、確認を求めます。同じマシンに紐づく Remote の自動接続を無効化し、それらの Herdr session の終了を試みてからマシンを停止します。永続ディスクのファイルは残りますが、実行中のプロセスは残りません。**Suspend remote** は確認後、同じマシンに紐づく Remote の自動接続を無効化し、マシンのメモリをスナップショットに保存します。Herdr session は中で動いたままなので、実行中のプログラムも保持されます。サスペンド中のマシンは **suspended** と表示され、**Start remote** は **Resume remote** になります。再開するとスナップショットを復元し、自動接続を有効化して再接続します。再接続や **Test connection** がマシンを再開することはありません。サインインの期限が切れると **Sign in to hangar** と表示されます。利用が許可されていないマシンでは「not allowed on this server」と表示され、再サインインは求めません。
 
-同じローカル Herdr state ディレクトリを使うクライアント間では Remote 設定の変更を直列化し、マシン操作は hangar サーバーが直列化します。他のクライアントが接続先を変更した場合、ダイアログを開き直してください。profile の削除はローカル設定だけを削除し、マシンやディスクは削除しません。SSH catalog は generation-one 互換のまま、ディレクトリ既定値と hangar binding は `client/locations.json` に保存します。以前の Instacloud 連携で作成した Remote はアップグレード時に無効化されます。profile と既定ディレクトリは残るので、不要なら削除してください。
+同じローカル Herdr state ディレクトリを使うクライアント間では Remote 設定の変更を直列化し、マシン操作は hangar サーバーが直列化します。他のクライアントが接続先を変更した場合、ダイアログを開き直してください。SSH profile の削除はローカル設定だけを削除します。hangar の Remote はマシンと一緒に削除されます。**Remove remote**（hangar の Remote では **Remove profile** も同じ）は、マシン名と削除される Remote を示して確認を求め、確認後にマシンとそのディスク・スナップショットを完全に削除し、そのマシンに紐づく全 Remote と証明書・接続キャッシュを削除します。hangar 側でマシンがすでに削除済みならローカルの後片付けだけを行います。それ以外の失敗では Remote を（無効化したまま）残すので、再試行できます。ターミナルでは `herdr machine remove <profile-id> --delete-machine` が同じ処理を行い、フラグがなければ拒否します。どの Remote にも使われていない hangar マシンは、**Add remote** で選ぶと **Delete machine…** が表示されます。SSH catalog は generation-one 互換のまま、ディレクトリ既定値と hangar binding は `client/locations.json` に保存します。以前の Instacloud 連携で作成した Remote はアップグレード時に無効化されます。profile と既定ディレクトリは残るので、不要なら削除してください。
 
 ## 接続前の確認
 
@@ -96,7 +96,7 @@ herdr machine list
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
-herdr machine remove <profile-id>
+herdr machine remove <profile-id> [--delete-machine]
 ```
 
 スクリプトでは `machine list` に `--json` を追加できます。
