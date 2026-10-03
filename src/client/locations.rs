@@ -383,6 +383,29 @@ pub(super) fn stop_remote(
         .cloud
         .as_ref()
         .ok_or("Stop machine requires a hangar machine")?;
+    let warnings = quiesce_machine(profile, cloud)?;
+    hangar::stop_machine(cloud.hangar(), &mut |_| {}).map_err(|error| error.to_string())?;
+    let message = format!("{}: stopped", cloud.hangar().machine_name);
+    Ok(with_warnings(message, &warnings))
+}
+
+fn with_warnings(message: String, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        message
+    } else {
+        format!(
+            "{message}. Graceful shutdown warnings: {}",
+            warnings.join("; ")
+        )
+    }
+}
+
+/// Disables automatic connection for every remote bound to the machine, then asks their
+/// Herdr sessions to stop. Returns graceful-shutdown warnings.
+fn quiesce_machine(
+    profile: &SavedSshEndpoint,
+    cloud: &CloudBinding,
+) -> Result<Vec<String>, String> {
     // Persist the fence before SSH or provider I/O: every client observes the same
     // disabled profiles, and reconnect never starts the machine again.
     set_service_enabled(profile, Some(cloud), false)?;
@@ -400,15 +423,66 @@ pub(super) fn stop_remote(
             }
         }
     }
-    hangar::stop_machine(cloud.hangar(), &mut |_| {}).map_err(|error| error.to_string())?;
-    let message = format!("{}: stopped", cloud.hangar().machine_name);
-    if warnings.is_empty() {
-        Ok(message)
-    } else {
-        Ok(format!(
-            "{message}. Graceful shutdown warnings: {}",
-            warnings.join("; ")
-        ))
+    Ok(warnings)
+}
+
+/// Save as image…: brings the machine to a stopped, uploaded state as `plan` says
+/// (the stop is the same as Stop machine), then saves its root disk as an image.
+pub(super) fn save_image_remote(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+    plan: hangar::SavePlan,
+    name: &str,
+    description: &str,
+) -> Result<String, String> {
+    let cloud = options
+        .cloud
+        .as_ref()
+        .ok_or("Save as image requires a hangar machine")?;
+    validate_binding(profile, Some(cloud))?;
+    hangar::validate_image_name(name)?;
+    let mut warnings = Vec::new();
+    let image = hangar::save_image(
+        cloud.hangar(),
+        plan,
+        &crate::hangar::api::CreateImageRequest { name, description },
+        &mut || {
+            warnings = quiesce_machine(profile, cloud)?;
+            Ok(())
+        },
+        &mut |_| {},
+    )
+    .map_err(|error| {
+        format!(
+            "Could not save image {name}: {}",
+            hangar::image_error(&error)
+        )
+    })?;
+    let machine = &cloud.hangar().machine_name;
+    let mut message = format!(
+        "Saved image {} from {machine}. Choose it as Source in Add remote → Create new machine.",
+        image.name
+    );
+    if plan != hangar::SavePlan::Save {
+        message.push_str(&format!(
+            " {machine} stays stopped; use Start remote to work on it again."
+        ));
+    }
+    Ok(with_warnings(message, &warnings))
+}
+
+/// Confirmation shown before an image is deleted.
+pub(crate) fn image_delete_confirmation(name: &str) -> String {
+    format!(
+        "Delete image '{name}'? New machines can no longer be created from it. Machines already created from it are not affected; they keep their own disks. This cannot be undone."
+    )
+}
+
+pub(super) fn delete_image(server: &str, id: &str, name: &str) -> Result<String, String> {
+    match hangar::delete_image(server, id) {
+        Ok(hangar::Deletion::Deleted) => Ok(format!("Deleted image {name}.")),
+        Ok(hangar::Deletion::AlreadyGone) => Ok(format!("Image {name} was already deleted.")),
+        Err(error) => Err(format!("Could not delete image {name}: {error}")),
     }
 }
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
+use crate::client::locations::hangar::{SaveCheck, SavePlan, IMAGE_CONTENTS};
 use crate::client::locations::{self as backend, LocationPreferences, RemoteOptions};
 use crate::hangar::api::MachineState;
 use crate::hangar::binding::HangarBinding;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 pub(super) mod add;
 
 const START_ROW: usize = 6;
+const SAVE_IMAGE_ROW: usize = 9;
 
 #[derive(Debug)]
 pub(super) enum LocationDialogKind {
@@ -20,6 +22,55 @@ pub(super) enum LocationDialogKind {
     Stop,
     Suspend,
     Delete(Box<DeleteRequest>),
+    SaveImage(Box<SaveImageRequest>),
+    DeleteImage(Box<ImageDeleteRequest>),
+}
+
+/// Save as image… for a hangar remote. The machine check runs on a worker.
+#[derive(Clone, Debug)]
+pub(super) struct SaveImageRequest {
+    pub profile: SavedSshEndpoint,
+    pub options: RemoteOptions,
+    pub machine_name: String,
+    /// `None` while the machine is being checked.
+    pub check: Option<SaveCheck>,
+    /// The last failed attempt, kept visible while the machine is checked again.
+    pub error: Option<String>,
+}
+
+impl SaveImageRequest {
+    pub fn plan(&self) -> Option<SavePlan> {
+        self.check.as_ref().and_then(|check| check.plan)
+    }
+
+    /// What the dialog says: a failure, how the machine becomes saveable, and what an
+    /// image contains.
+    pub fn message(&self) -> String {
+        let status = match &self.check {
+            None => format!("Checking {}…", self.machine_name),
+            Some(check) => check.note.clone(),
+        };
+        [self.error.as_deref().unwrap_or(""), &status, IMAGE_CONTENTS]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub fn primary_label(&self) -> &'static str {
+        match self.plan() {
+            Some(SavePlan::Stop | SavePlan::ResumeThenStop) => " ↵ stop machine and save ",
+            _ => " ↵ save ",
+        }
+    }
+}
+
+/// Delete image… from Add remote's source picker.
+#[derive(Clone, Debug)]
+pub(super) struct ImageDeleteRequest {
+    pub server: String,
+    pub id: String,
+    pub name: String,
 }
 
 /// A confirmed Remove remote deletes this hangar machine.
@@ -56,11 +107,13 @@ impl LocationDialog {
             LocationDialogKind::Stop => "stop machine",
             LocationDialogKind::Suspend => "suspend machine",
             LocationDialogKind::Delete(_) => "delete machine",
+            LocationDialogKind::SaveImage(_) => "save as image",
+            LocationDialogKind::DeleteImage(_) => "delete image",
         }
     }
     pub fn labels(&self) -> &[&str] {
         match self.kind {
-            LocationDialogKind::Add(_) => &["Provider", "Machine", "Name"],
+            LocationDialogKind::Add(_) => &["Provider", "Machine", "Name", "Source", ""],
             LocationDialogKind::Manage => &[
                 "Location",
                 "Add remote",
@@ -71,6 +124,7 @@ impl LocationDialog {
                 "Start remote",
                 "Suspend remote…",
                 "Stop machine…",
+                "Save as image…",
                 "Remove remote…",
                 "Remove profile",
             ],
@@ -78,9 +132,11 @@ impl LocationDialog {
                 &["Name", "SSH target", "Herdr session", "Default directory"]
             }
             LocationDialogKind::New => &["Name", "Location", "Directory"],
+            LocationDialogKind::SaveImage(_) => &["Image name", "Description"],
             LocationDialogKind::Stop
             | LocationDialogKind::Suspend
-            | LocationDialogKind::Delete(_) => &[],
+            | LocationDialogKind::Delete(_)
+            | LocationDialogKind::DeleteImage(_) => &[],
         }
     }
     /// The selected remote's hangar machine state, when known.
@@ -168,6 +224,7 @@ impl LocationDialog {
                     | LocationDialogKind::Stop
                     | LocationDialogKind::Suspend
                     | LocationDialogKind::Delete(_)
+                    | LocationDialogKind::DeleteImage(_)
             )
         {
             return None;
@@ -237,7 +294,12 @@ pub(super) struct LocationController {
     prepared: Option<(u64, NewLocationWorkspace, Instant)>,
     created: Option<CreatedLocationWorkspace>,
     states: Option<(u64, mpsc::Receiver<MachineStates>)>,
+    image_check: Option<(u64, mpsc::Receiver<Result<SaveCheck, String>>)>,
+    /// Replaces the hangar request behind Save as image's check in tests.
+    save_checker: Option<SaveChecker>,
 }
+
+type SaveChecker = fn(&HangarBinding) -> Result<SaveCheck, crate::hangar::api::HangarError>;
 
 type MachineStates = Vec<((String, String), MachineState)>;
 
@@ -530,6 +592,19 @@ impl ClientShellState {
                 }
                 Ok(())
             }
+            LocationDialogKind::SaveImage(request) => {
+                let request = (**request).clone();
+                self.submit_save_image(request);
+                Ok(())
+            }
+            LocationDialogKind::DeleteImage(request) => {
+                let request = (**request).clone();
+                self.location_job(move || {
+                    backend::delete_image(&request.server, &request.id, &request.name)
+                        .map(JobResult::Message)
+                });
+                Ok(())
+            }
             LocationDialogKind::Delete(request) => {
                 let request = (**request).clone();
                 self.location_job(move || {
@@ -656,12 +731,26 @@ impl ClientShellState {
                     dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend remote… keeps them). Automatic connection is disabled until Start remote.");
                 }
             }
-            9 | 10 => match options.cloud.clone() {
+            SAVE_IMAGE_ROW => {
+                let Some(cloud) = options.cloud.as_ref() else {
+                    return Err("Save as image requires a hangar machine.".into());
+                };
+                let machine_name = cloud.hangar().machine_name.clone();
+                self.show_save_image(SaveImageRequest {
+                    machine_name,
+                    profile,
+                    options,
+                    check: None,
+                    error: None,
+                });
+                self.check_save_image();
+            }
+            10 | 11 => match options.cloud.clone() {
                 Some(cloud) => self.confirm_delete(DeleteRequest {
                     binding: cloud.hangar().clone(),
                     remote: Some((profile, options)),
                 }),
-                None if action == 9 => {
+                None if action == 10 => {
                     return Err(
                         "This SSH remote has no hangar machine to delete. Use Remove profile."
                             .into(),
@@ -675,6 +764,95 @@ impl ClientShellState {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Switches the dialog to Save as image… with empty name and description.
+    fn show_save_image(&mut self, request: SaveImageRequest) {
+        if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+            dialog.message = request.message();
+            dialog.kind = LocationDialogKind::SaveImage(Box::new(request));
+            dialog.fields = vec![TextEditor::new("", false), TextEditor::new("", false)];
+            dialog.selected = 0;
+        }
+    }
+
+    /// Reads the machine's state and template on a worker; the result decides whether
+    /// the dialog saves directly, stops first, or explains why it cannot save.
+    fn check_save_image(&mut self) {
+        let Some(ClientShellOverlay::Locations(LocationDialog {
+            kind: LocationDialogKind::SaveImage(request),
+            ..
+        })) = self.overlay.as_ref()
+        else {
+            return;
+        };
+        let Some(cloud) = request.options.cloud.clone() else {
+            return;
+        };
+        let checker = self
+            .locations
+            .save_checker
+            .unwrap_or(backend::hangar::check_save);
+        let (send, receive) = mpsc::channel();
+        self.locations.image_check = Some((self.locations.epoch, receive));
+        std::thread::spawn(move || {
+            let result = checker(cloud.hangar()).map_err(|error| {
+                format!(
+                    "Could not check {}: {error} Close and reopen Save as image… to retry.",
+                    cloud.hangar().machine_name
+                )
+            });
+            let _ = send.send(result);
+        });
+    }
+
+    fn submit_save_image(&mut self, request: SaveImageRequest) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+        let name = dialog
+            .fields
+            .first()
+            .map(|field| field.trim().to_owned())
+            .unwrap_or_default();
+        let description = dialog
+            .fields
+            .get(1)
+            .map(|field| field.trim().to_owned())
+            .unwrap_or_default();
+        let Some(plan) = request.plan() else {
+            // Still checking, or the machine cannot be saved; the message says which.
+            return;
+        };
+        let invalid = backend::hangar::validate_image_name(&name)
+            .err()
+            .or_else(|| {
+                (description.len() > 1000)
+                    .then(|| "The description can be at most 1000 characters.".to_owned())
+            });
+        if let Some(error) = invalid {
+            dialog.selected = if description.len() > 1000 && !name.is_empty() {
+                1
+            } else {
+                0
+            };
+            dialog.message = SaveImageRequest {
+                error: Some(error),
+                ..request
+            }
+            .message();
+            return;
+        }
+        self.location_job(move || {
+            backend::save_image_remote(
+                &request.profile,
+                &request.options,
+                plan,
+                &name,
+                &description,
+            )
+            .map(JobResult::Message)
+        });
     }
 
     /// Shows what a confirmed delete destroys: the machine, its disks and snapshots,
@@ -809,6 +987,33 @@ impl ClientShellState {
                 }
             }
         }
+        let checked = self
+            .locations
+            .image_check
+            .as_ref()
+            .and_then(|(epoch, receiver)| match receiver.try_recv() {
+                Ok(result) => Some((*epoch, result)),
+                Err(mpsc::TryRecvError::Disconnected) => Some((
+                    *epoch,
+                    Err("The machine check stopped unexpectedly.".into()),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some((epoch, result)) = checked {
+            self.locations.image_check = None;
+            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+                if let LocationDialogKind::SaveImage(request) = &mut dialog.kind {
+                    if epoch == self.locations.epoch {
+                        request.check =
+                            Some(result.unwrap_or_else(|note| SaveCheck { plan: None, note }));
+                        if !dialog.busy {
+                            dialog.message = request.message();
+                        }
+                        outcome.repaint = true;
+                    }
+                }
+            }
+        }
         let received =
             self.locations
                 .job
@@ -821,8 +1026,10 @@ impl ClientShellState {
                     Err(mpsc::TryRecvError::Empty) => None,
                 });
         let mut refresh_states = false;
+        let mut recheck_image = false;
         if let Some((epoch, result)) = received {
             self.locations.job = None;
+            let succeeded = result.is_ok();
             let current = epoch == self.locations.epoch
                 && matches!(self.overlay, Some(ClientShellOverlay::Locations(_)));
             let message = match result {
@@ -860,9 +1067,26 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                     dialog.busy =
                         self.locations.created.is_some() || self.locations.prepared.is_some();
-                    dialog.message = message;
-                    if matches!(dialog.kind, LocationDialogKind::Delete(_)) {
-                        // A finished delete never stays armed for a second Enter.
+                    dialog.message = message.clone();
+                    let saved =
+                        succeeded && matches!(dialog.kind, LocationDialogKind::SaveImage(_));
+                    if let (LocationDialogKind::SaveImage(request), false) =
+                        (&mut dialog.kind, succeeded)
+                    {
+                        // The attempt may have stopped the machine: check it again and
+                        // keep the error visible meanwhile.
+                        request.error = Some(message);
+                        request.check = None;
+                        dialog.message = request.message();
+                        recheck_image = true;
+                    }
+                    if saved
+                        || matches!(
+                            dialog.kind,
+                            LocationDialogKind::Delete(_) | LocationDialogKind::DeleteImage(_)
+                        )
+                    {
+                        // A finished delete or save never stays armed for a second Enter.
                         dialog.kind = LocationDialogKind::Manage;
                         dialog.selected = 0;
                     }
@@ -881,6 +1105,9 @@ impl ClientShellState {
         }
         if refresh_states {
             self.refresh_machine_states();
+        }
+        if recheck_image {
+            self.check_save_image();
         }
         let owns_new_dialog = matches!(
             self.overlay,
@@ -1072,6 +1299,165 @@ mod tests {
         assert!(matches!(dialog.kind, LocationDialogKind::Manage));
         assert!(!dialog.busy);
         assert!(dialog.message.contains("Could not delete"));
+    }
+
+    fn save_image_shell(check: Option<SaveCheck>) -> ClientShellState {
+        let mut state = shell();
+        state.locations.save_checker = Some(|_| {
+            Err(crate::hangar::api::HangarError::Invalid(
+                "offline in tests".into(),
+            ))
+        });
+        let dialog = hangar_dialog();
+        let profile = dialog.profiles[0].clone();
+        let options = dialog.prefs.remotes[&profile.id].clone();
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        state.show_save_image(SaveImageRequest {
+            profile,
+            options,
+            machine_name: "box".into(),
+            check,
+            error: None,
+        });
+        state
+    }
+
+    fn save_request(state: &ClientShellState) -> (&LocationDialog, &SaveImageRequest) {
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        let LocationDialogKind::SaveImage(request) = &dialog.kind else {
+            panic!("save as image");
+        };
+        (dialog, request)
+    }
+
+    fn deliver_check(state: &mut ClientShellState, epoch: u64, check: SaveCheck) {
+        let (send, receive) = mpsc::channel();
+        state.locations.image_check = Some((epoch, receive));
+        send.send(Ok(check)).unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+    }
+
+    fn type_name(state: &mut ClientShellState, name: &str) {
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() else {
+            panic!("dialog");
+        };
+        dialog.fields[0] = TextEditor::new(name, false);
+    }
+
+    #[test]
+    fn save_as_image_sits_next_to_the_machine_actions_and_states_what_is_saved() {
+        let dialog = hangar_dialog();
+        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW - 1), "Stop machine…");
+        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW), "Save as image…");
+        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW + 1), "Remove remote…");
+        let mut state = save_image_shell(None);
+        let (dialog, request) = save_request(&state);
+        assert_eq!(dialog.labels(), ["Image name", "Description"]);
+        assert!(dialog.message.contains("Checking box…"));
+        for part in [
+            "root disk only",
+            "Installed packages and system configuration are included",
+            "home directory files, logins and /data/workspace are not",
+            "`sudo gh auth`",
+            "/etc/environment",
+            "private",
+        ] {
+            assert!(dialog.message.contains(part), "{part}: {}", dialog.message);
+        }
+        assert_eq!(request.plan(), None);
+        // Enter does nothing until the check arrives.
+        type_name(&mut state, "base");
+        state.accept_location(&mut ClientShellInput::default());
+        assert!(state.locations.job.is_none());
+        let typed = crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        state.route_location_key(&typed, &mut ClientShellInput::default());
+        assert_eq!(save_request(&state).0.fields[0].as_str(), "basex");
+        state.compose(110, 35).unwrap();
+    }
+
+    #[test]
+    fn a_running_machine_offers_stop_machine_and_save_and_old_templates_refuse() {
+        let mut state = save_image_shell(None);
+        let epoch = state.locations.epoch;
+        let running = SaveCheck {
+            plan: Some(SavePlan::Stop),
+            note: "box is running. Only a stopped machine can be saved.".into(),
+        };
+        deliver_check(&mut state, epoch, running);
+        let (dialog, request) = save_request(&state);
+        assert_eq!(request.primary_label(), " ↵ stop machine and save ");
+        assert!(dialog.message.starts_with("box is running."));
+        assert!(dialog.message.contains("root disk only"));
+        state.compose(110, 35).unwrap();
+        // A check for an older dialog is ignored.
+        deliver_check(
+            &mut state,
+            epoch.wrapping_sub(1),
+            SaveCheck {
+                plan: None,
+                note: "stale".into(),
+            },
+        );
+        assert_eq!(save_request(&state).1.plan(), Some(SavePlan::Stop));
+
+        let mut state = save_image_shell(Some(SaveCheck {
+            plan: None,
+            note: "box was created from template herdr@old, which is too old to save images from."
+                .into(),
+        }));
+        type_name(&mut state, "base");
+        state.accept_location(&mut ClientShellInput::default());
+        assert!(state.locations.job.is_none(), "an old template never saves");
+        assert_eq!(save_request(&state).1.primary_label(), " ↵ save ");
+    }
+
+    #[test]
+    fn an_invalid_image_name_stops_nothing() {
+        let mut state = save_image_shell(Some(SaveCheck {
+            plan: Some(SavePlan::Stop),
+            note: String::new(),
+        }));
+        type_name(&mut state, "Not Valid");
+        state.accept_location(&mut ClientShellInput::default());
+        assert!(state.locations.job.is_none());
+        let (dialog, _) = save_request(&state);
+        assert!(dialog.message.starts_with("Image names use"));
+        assert_eq!(dialog.selected, 0);
+    }
+
+    #[test]
+    fn a_failed_save_stays_open_and_rechecks_while_a_saved_one_returns_to_the_list() {
+        let mut state = save_image_shell(Some(SaveCheck {
+            plan: Some(SavePlan::Save),
+            note: String::new(),
+        }));
+        let (send, receive) = mpsc::channel();
+        state.locations.job = Some((state.locations.epoch, receive));
+        send.send(Err(
+            "Could not save image base: an image named \"base\" already exists".into(),
+        ))
+        .unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        let (dialog, request) = save_request(&state);
+        assert!(dialog.message.contains("already exists"));
+        assert!(dialog.message.contains("Checking box…"));
+        assert!(request.check.is_none());
+        assert!(state.locations.image_check.is_some(), "checks again");
+        let (send, receive) = mpsc::channel();
+        state.locations.job = Some((state.locations.epoch, receive));
+        send.send(Ok(JobResult::Message("Saved image base from box.".into())))
+            .unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
+            panic!("dialog");
+        };
+        assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+        assert!(dialog.message.contains("Saved image base"));
     }
 
     #[test]

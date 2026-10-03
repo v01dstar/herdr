@@ -35,6 +35,14 @@ Herdr 不会隐式启动机器。机器停止时，重连、**Test connection**�
 
 共享本地 Herdr state 目录的客户端会串行修改 Remote 设置，机器操作由 hangar 服务器串行执行。其他客户端修改连接目标后，需要重新打开弹窗才可操作新目标。移除 SSH profile 只删除本地连接设置。hangar Remote 会连同机器一起删除：**Remove remote**（在 hangar Remote 上 **Remove profile** 也一样）会先确认，列出机器名和将被移除的 Remote，确认后永久删除机器及其磁盘和快照，并移除绑定该机器的所有 Remote 及其证书和连接缓存。如果 hangar 中机器已被删除，Herdr 只做本地清理；其他失败会保留这些 Remote（保持禁用），便于重试。在终端中，`herdr machine remove <profile-id> --delete-machine` 执行相同操作；不带该参数时会拒绝。未被任何 Remote 使用的 hangar 机器，在 **Add remote** 中选中后会显示 **Delete machine…**。SSH catalog 保持 generation-one 兼容，目录默认值和 hangar 绑定单独保存在 `client/locations.json`。之前通过 Instacloud 集成创建的 Remote 会在升级时被禁用，其 profile 和默认目录会保留，可自行删除。
 
+#### 镜像
+
+镜像保存机器的根磁盘，之后可以基于它创建新机器。在 hangar Remote 上选择 **Save as image…**，输入名称（小写字母、数字和 `-`）和可选描述后确认。只保存根磁盘：已安装的软件包和系统配置会包含在内，但主目录（`/data/home`）中的文件、保存在其中的登录信息（gh、Claude、Codex、git、SSH）以及 `/data/workspace` 不会包含。写入根磁盘的任何内容都会包含在内，例如 `sudo gh auth` 的凭据或 `/etc/environment` 中的令牌，请在保存前删除。镜像仅对你的 hangar 账号可见。
+
+只能保存已停止的机器。对于运行中的机器，弹窗会提供 **Stop machine and save**：它按 **Stop machine** 的相同步骤停止机器（禁用自动连接、关闭 Herdr session、停止机器），然后保存镜像；已挂起的机器会先恢复再停止。保存后机器保持停止状态，如需继续使用请点击 **Start remote**。由不支持重置机器身份的旧模板创建的机器无法保存，弹窗会说明这一点；请用最新模板创建新机器，配置好后再保存。
+
+要使用镜像，选择 **Add remote → Create new machine**，并在 **Source** 中选择镜像；列表显示每个镜像的名称、创建日期和来源机器。默认来源是最新的 `herdr` 模板。基于镜像创建的机器使用镜像的根磁盘和一个新的空 `/data`，因此需要在新机器上重新登录各工具。将镜像选为来源时，可通过 **Delete image…** 在确认后删除它；已基于该镜像创建的机器不受影响。
+
 ## 连接前的准备
 
 你需要能够通过普通 SSH 访问远程机器。先验证：

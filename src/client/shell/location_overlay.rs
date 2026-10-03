@@ -78,8 +78,17 @@ pub(in crate::client::shell) fn render_locations(
         hits.push((rect, index));
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
-    // Confirmations have no rows, so their text gets the whole body.
-    let message_area = if dialog.labels().is_empty() {
+    // Confirmations have no rows, so their text gets the whole body; Save as image has
+    // two rows and a long explanation below them.
+    let message_area = if let LocationDialogKind::SaveImage(_) = dialog.kind {
+        let top = inner.y + 2 + dialog.labels().len() as u16 + 1;
+        Rect::new(
+            inner.x + 1,
+            top,
+            inner.width.saturating_sub(2),
+            inner.bottom().saturating_sub(2).saturating_sub(top),
+        )
+    } else if dialog.labels().is_empty() {
         Rect::new(
             inner.x + 1,
             inner.y + 2,
@@ -98,9 +107,6 @@ pub(in crate::client::shell) fn render_locations(
         .style(normal)
         .wrap(Wrap { trim: true })
         .render(message_area, buffer);
-    let buttons = row(inner, &[14, 12], 2, inner.height.saturating_sub(1));
-    let primary = buttons[0];
-    let cancel = buttons[1];
     let label = if dialog.busy {
         " working… "
     } else {
@@ -111,14 +117,25 @@ pub(in crate::client::shell) fn render_locations(
             LocationDialogKind::New => " ↵ create ",
             LocationDialogKind::Stop => " ↵ stop ",
             LocationDialogKind::Suspend => " ↵ suspend ",
-            LocationDialogKind::Delete(_) => " ↵ delete ",
+            LocationDialogKind::Delete(_) | LocationDialogKind::DeleteImage(_) => " ↵ delete ",
+            LocationDialogKind::SaveImage(ref request) => request.primary_label(),
         }
     };
+    // Save as image cannot proceed while checking or when the machine cannot be saved.
+    let enabled = !dialog.busy
+        && match &dialog.kind {
+            LocationDialogKind::SaveImage(request) => request.plan().is_some(),
+            _ => true,
+        };
+    let width = display_width(label).max(14);
+    let buttons = row(inner, &[width, 12], 2, inner.height.saturating_sub(1));
+    let primary = buttons[0];
+    let cancel = buttons[1];
     button(
         buffer,
         primary,
         label,
-        if dialog.busy { normal } else { highlight },
+        if enabled { highlight } else { normal },
     );
     button(buffer, cancel, " esc close ", normal.bg(palette.surface0));
     Some(OverlayRender {
@@ -131,7 +148,9 @@ pub(in crate::client::shell) fn render_locations(
     })
 }
 
-use crate::client::shell::locations::add::{AddRemoteForm, NAME_FIELD};
+use crate::client::shell::locations::add::{
+    AddRemoteForm, IMAGE_ACTION_FIELD, NAME_FIELD, SOURCE_FIELD,
+};
 
 pub(in crate::client::shell) fn render_add_remote(
     buffer: &mut Buffer,
@@ -180,6 +199,25 @@ pub(in crate::client::shell) fn render_add_remote(
                 style,
             );
             hits.push((rect, i));
+            continue;
+        }
+        if i == IMAGE_ACTION_FIELD {
+            // The image chosen as source can be deleted here.
+            if form.deletable_image().is_some() {
+                buffer.set_style(rect, style);
+                put_text(
+                    buffer,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    &format!("{:<10} [ Delete image… ]", ""),
+                    style,
+                );
+                hits.push((rect, i));
+            }
+            continue;
+        }
+        if i == SOURCE_FIELD && !form.creating() {
             continue;
         }
         if i == NAME_FIELD {

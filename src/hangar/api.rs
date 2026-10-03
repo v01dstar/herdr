@@ -143,6 +143,49 @@ pub(crate) struct Runtime {
     pub ready: bool,
 }
 
+/// The template version a machine or image was made from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TemplateRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+impl TemplateRef {
+    pub(crate) fn label(&self) -> String {
+        match (self.id.is_empty(), self.version.is_empty()) {
+            (true, _) => "unknown template".into(),
+            (false, true) => self.id.clone(),
+            (false, false) => format!("{}@{}", self.id, self.version),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImageRef {
+    #[serde(default)]
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkRef {
+    #[serde(default)]
+    pub machine_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Storage {
+    /// False while the newest state of a stopped or suspended machine exists only on
+    /// its host; images need it uploaded.
+    #[serde(default)]
+    pub synced: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Machine {
@@ -153,6 +196,83 @@ pub(crate) struct Machine {
     pub runtime: Runtime,
     #[serde(default)]
     pub last_error: Option<ErrorDetail>,
+    /// Absent on servers that predate it.
+    #[serde(default)]
+    pub template: Option<TemplateRef>,
+    #[serde(default)]
+    pub storage: Option<Storage>,
+    /// The image the machine was created from.
+    #[serde(default)]
+    pub image: Option<ImageRef>,
+    /// The machine a fork was copied from.
+    #[serde(default)]
+    pub forked_from: Option<ForkRef>,
+}
+
+/// Guest capabilities of a template version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TemplateCapability {
+    /// Images and forks of its machines are allowed.
+    IdentityReset,
+    RootGrow,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Template {
+    pub id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub capabilities: Vec<TemplateCapability>,
+}
+
+impl Template {
+    pub(crate) fn has(&self, capability: TemplateCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+}
+
+#[derive(Deserialize)]
+struct TemplateList {
+    #[serde(default)]
+    templates: Vec<Template>,
+}
+
+/// A private image: the root disk of a stopped machine.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Image {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source_machine_id: String,
+    #[serde(default)]
+    pub template: TemplateRef,
+    #[serde(default)]
+    pub root_size_bytes: u64,
+    /// RFC 3339.
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ImageList {
+    #[serde(default)]
+    images: Vec<Image>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateImageRequest<'a> {
+    pub name: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub description: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -239,7 +359,11 @@ pub(crate) struct Tokens {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateMachineRequest<'a> {
     pub name: &'a str,
-    pub template_id: &'a str,
+    /// Exactly one of `template_id` and `image_id` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +850,47 @@ impl Client {
         )
     }
 
+    pub(crate) fn templates(&self) -> Result<Vec<Template>, HangarError> {
+        let list: TemplateList = self.call("GET", "/v1/templates", None, None, true)?;
+        Ok(list.templates)
+    }
+
+    /// The caller's images, oldest first.
+    pub(crate) fn images(&self) -> Result<Vec<Image>, HangarError> {
+        let list: ImageList = self.call("GET", "/v1/images", None, None, true)?;
+        Ok(list.images)
+    }
+
+    /// Saves a stopped, synced machine's root disk as an image. Synchronous.
+    pub(crate) fn create_image(
+        &self,
+        key: &str,
+        machine_id: &str,
+        request: &CreateImageRequest<'_>,
+    ) -> Result<Image, HangarError> {
+        let body = serde_json::to_string(request)
+            .map_err(|error| HangarError::Invalid(error.to_string()))?;
+        self.call(
+            "POST",
+            &format!("/v1/machines/{}/images", path_segment(machine_id)?),
+            Some(body),
+            Some(key),
+            true,
+        )
+    }
+
+    /// Deletes an image; machines created from it are not affected.
+    pub(crate) fn delete_image(&self, key: &str, id: &str) -> Result<(), HangarError> {
+        self.request(
+            "DELETE",
+            &format!("/v1/images/{}", path_segment(id)?),
+            None,
+            Some(key),
+            true,
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn operation(&self, id: &str) -> Result<Operation, HangarError> {
         self.call(
             "GET",
@@ -945,6 +1110,22 @@ pub(crate) mod fake {
         })
     }
 
+    pub(crate) fn image(id: &str, name: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "name": name, "sourceMachineId": source, "sourceSnapshotSeq": 3,
+            "template": {"id": "herdr", "version": "2026-10-03.2", "digest": "sha256:x"},
+            "rootSizeBytes": 4294967296u64, "createdAt": "2026-10-03T08:00:00Z"
+        })
+    }
+
+    pub(crate) fn template(version: &str, capabilities: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "id": "herdr", "version": version, "digest": "sha256:x", "arch": "x86_64",
+            "defaultSpec": {"vcpus": 2, "memMiB": 2048, "persistentDiskGiB": 5},
+            "capabilities": capabilities
+        })
+    }
+
     pub(crate) fn operation(id: &str, kind: &str, state: &str) -> serde_json::Value {
         serde_json::json!({
             "id": id, "machineId": "m_x", "type": kind, "state": state, "error": null,
@@ -975,6 +1156,80 @@ mod tests {
             ErrorCode::parse("teleport_failed"),
             ErrorCode::Unknown("teleport_failed".into())
         );
+    }
+
+    #[test]
+    fn image_fields_and_unknown_capabilities_decode() {
+        let machine: Machine = serde_json::from_value(serde_json::json!({
+            "id": "m_a", "name": "a", "state": "stopped",
+            "template": {"id": "herdr", "version": "v1", "digest": "d"},
+            "storage": {"sizeGiB": 5, "mountPath": "/data", "persistent": true, "synced": true},
+            "image": {"id": "im_a"}, "forkedFrom": {"machineId": "m_b", "snapshotSeq": 2}
+        }))
+        .unwrap();
+        assert_eq!(machine.template.unwrap().label(), "herdr@v1");
+        assert!(machine.storage.unwrap().synced);
+        assert_eq!(machine.image.unwrap().id, "im_a");
+        assert_eq!(machine.forked_from.unwrap().machine_id, "m_b");
+        let template: Template =
+            serde_json::from_value(template("v2", &["identity-reset", "teleport"])).unwrap();
+        assert!(template.has(TemplateCapability::IdentityReset));
+        assert_eq!(template.capabilities[1], TemplateCapability::Unknown);
+        let image: Image = serde_json::from_value(image("im_a", "base", "m_a")).unwrap();
+        assert_eq!(image.template.label(), "herdr@2026-10-03.2");
+    }
+
+    #[test]
+    fn image_mutations_carry_keys_and_create_sends_only_the_image() {
+        let http = FakeHttp::new();
+        http.reply(201, image("im_a", "base", "m_a"))
+            .push(Ok(HttpResponse {
+                status: 204,
+                body: Vec::new(),
+            }))
+            .reply(202, operation("op_1", "create", "queued"));
+        let client = client(&http);
+        let saved = client
+            .create_image(
+                "k1",
+                "m_a",
+                &CreateImageRequest {
+                    name: "base",
+                    description: "",
+                },
+            )
+            .unwrap();
+        assert_eq!(saved.id, "im_a");
+        client.delete_image("k2", "im_a").unwrap();
+        client
+            .create_machine(
+                "k3",
+                &CreateMachineRequest {
+                    name: "box",
+                    template_id: None,
+                    image_id: Some("im_a"),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            http.paths(),
+            [
+                "POST /v1/machines/m_a/images",
+                "DELETE /v1/images/im_a",
+                "POST /v1/machines"
+            ]
+        );
+        let sent = http.sent();
+        assert!(sent.iter().all(|request| request.idempotency_key.is_some()));
+        let body = |index: usize| -> serde_json::Value {
+            serde_json::from_str(sent[index].body.as_deref().unwrap()).unwrap()
+        };
+        assert_eq!(body(0), serde_json::json!({"name": "base"}));
+        assert_eq!(
+            body(2),
+            serde_json::json!({"name": "box", "imageId": "im_a"})
+        );
+        assert!(client.delete_image("k", "../x").is_err());
     }
 
     #[test]
