@@ -91,7 +91,7 @@ pub(crate) struct ApiError {
     pub operation_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MachineState {
     Creating,
@@ -808,7 +808,11 @@ impl Client {
                 None => return Ok(machines),
             }
         }
-        Ok(machines)
+        // A cut-off list would look like deleted machines to a sync: it is a failure.
+        Err(HangarError::Invalid(format!(
+            "more than {} machines are listed; the list is incomplete",
+            MAX_MACHINE_PAGES * 100
+        )))
     }
 
     pub(crate) fn machine(&self, id: &str) -> Result<Machine, HangarError> {
@@ -1240,6 +1244,28 @@ pub(crate) mod fake {
 mod tests {
     use super::fake::*;
     use super::*;
+
+    #[test]
+    fn an_incomplete_machine_listing_is_an_error_not_a_shorter_list() {
+        let page = |id: &str, next: Option<&str>| serde_json::json!({"machines": [machine(id, "running", true)], "nextCursor": next});
+        // Every page leads to another: the cap is reached with a cursor remaining.
+        let http = FakeHttp::new();
+        for index in 0..MAX_MACHINE_PAGES {
+            http.reply(200, page(&format!("m_{index}"), Some("more")));
+        }
+        assert!(client(&http).machines().is_err());
+        assert_eq!(http.sent().len(), MAX_MACHINE_PAGES);
+        // A failing later page fails the whole listing.
+        let http = FakeHttp::new();
+        http.reply(200, page("m_a", Some("c2")))
+            .error(500, "internal");
+        assert!(client(&http).machines().is_err());
+        // A complete listing follows the cursor to the end.
+        let http = FakeHttp::new();
+        http.reply(200, page("m_a", Some("c2")))
+            .reply(200, page("m_b", None));
+        assert_eq!(client(&http).machines().unwrap().len(), 2);
+    }
 
     #[test]
     fn unknown_states_and_codes_decode_to_fallbacks() {

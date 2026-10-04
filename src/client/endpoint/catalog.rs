@@ -108,8 +108,27 @@ impl EndpointCatalog {
         Self::load_from_path(&catalog_path()).map(|catalog| catalog.ssh)
     }
 
+    /// The saved catalog plus `extra` profiles that are not stored in it (hangar
+    /// machines), with the saved selection checked against both. Never store the result
+    /// with `store_profiles`.
+    pub(crate) fn load_with(extra: Vec<SavedSshEndpoint>) -> Result<Self, String> {
+        Self::load_from_paths_with(&catalog_path(), &selection_path(), extra)
+    }
+
     fn load_from_paths(catalog_path: &Path, selection_path: &Path) -> Result<Self, String> {
+        Self::load_from_paths_with(catalog_path, selection_path, Vec::new())
+    }
+
+    fn load_from_paths_with(
+        catalog_path: &Path,
+        selection_path: &Path,
+        extra: Vec<SavedSshEndpoint>,
+    ) -> Result<Self, String> {
         let mut catalog = Self::load_from_path(catalog_path)?;
+        for profile in extra {
+            catalog.ssh.retain(|saved| saved.id != profile.id);
+            catalog.ssh.push(profile);
+        }
         match load_selection_from_path(selection_path) {
             Ok(Some(selection)) => {
                 let valid = selection.selected_profile.as_ref().is_none_or(|selected| {
@@ -148,7 +167,16 @@ impl EndpointCatalog {
     }
 
     fn store_selection_to_path(&self, path: &Path) -> Result<(), String> {
-        self.validate()?;
+        // Only the selection is stored; the profiles may include hangar machines that
+        // are not saved here.
+        if self.selected_profile.as_ref().is_some_and(|selected| {
+            !self
+                .ssh
+                .iter()
+                .any(|profile| &profile.id == selected && profile.enabled)
+        }) {
+            return Err("selected SSH endpoint is absent or disabled in the catalog".into());
+        }
         let content = serde_json::to_vec_pretty(&EndpointSelection {
             version: SELECTION_VERSION,
             selected_profile: self.selected_profile.clone(),
@@ -524,6 +552,43 @@ mod tests {
                 .unwrap()
                 .selected_profile,
             Some(id)
+        );
+        std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_selected_profile_that_is_not_saved_here_is_kept_and_never_stored_as_a_profile() {
+        let catalog_path = path("unsaved-extra");
+        let selection_path = catalog_path.with_file_name("selection.json");
+        let _ = std::fs::remove_dir_all(catalog_path.parent().unwrap());
+        let mut saved = EndpointCatalog::default();
+        saved.add_ssh("Build", "build", "main").unwrap();
+        saved.store_to_path(&catalog_path).unwrap();
+        let extra = SavedSshEndpoint::new("box", "hangar-m_x", "herdr-remote").unwrap();
+        let mut live = EndpointCatalog::load_from_paths_with(
+            &catalog_path,
+            &selection_path,
+            vec![extra.clone()],
+        )
+        .unwrap();
+        assert!(live.select_ssh(&extra.id));
+        live.store_selection_to_path(&selection_path).unwrap();
+        // The selection survives a reload only with the same extra profile.
+        let reloaded = EndpointCatalog::load_from_paths_with(
+            &catalog_path,
+            &selection_path,
+            vec![extra.clone()],
+        )
+        .unwrap();
+        assert_eq!(reloaded.selected_profile.as_ref(), Some(&extra.id));
+        let plain = EndpointCatalog::load_from_paths(&catalog_path, &selection_path).unwrap();
+        assert_eq!(plain.selected_profile, None);
+        assert_eq!(
+            EndpointCatalog::load_from_path(&catalog_path)
+                .unwrap()
+                .ssh
+                .len(),
+            1
         );
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
     }

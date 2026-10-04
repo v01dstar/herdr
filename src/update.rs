@@ -2229,7 +2229,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
 }
 
 fn print_saved_machine_update_notice() {
-    let profiles = match crate::client::endpoint::EndpointCatalog::load_profiles() {
+    let profiles = match crate::client::locations::effective_profiles() {
         Ok(profiles) => profiles,
         Err(error) => {
             tracing::debug!(%error, "skipping saved machine update notice");

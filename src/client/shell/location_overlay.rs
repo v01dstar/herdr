@@ -182,9 +182,7 @@ pub(in crate::client::shell) fn render_locations(
     })
 }
 
-use crate::client::shell::locations::add::{
-    AddRemoteForm, IMAGE_ACTION_FIELD, NAME_FIELD, SOURCE_FIELD,
-};
+use crate::client::shell::locations::add::{AddRemoteForm, IMAGE_ACTION_FIELD, NAME_FIELD};
 
 pub(in crate::client::shell) fn render_add_remote(
     buffer: &mut Buffer,
@@ -221,20 +219,6 @@ pub(in crate::client::shell) fn render_add_remote(
         } else {
             normal
         };
-        if i == NAME_FIELD && form.deletable().is_some() {
-            // A machine no remote uses can be deleted instead of added.
-            buffer.set_style(rect, style);
-            put_text(
-                buffer,
-                rect.x,
-                rect.y,
-                rect.width,
-                &format!("{:<10} [ Delete machine… ]", ""),
-                style,
-            );
-            hits.push((rect, i));
-            continue;
-        }
         if i == IMAGE_ACTION_FIELD {
             // The image chosen as source can be deleted here.
             if form.deletable_image().is_some() {
@@ -251,14 +235,7 @@ pub(in crate::client::shell) fn render_add_remote(
             }
             continue;
         }
-        if i == SOURCE_FIELD && !form.creating() {
-            continue;
-        }
         if i == NAME_FIELD {
-            // Only creating a machine needs a name.
-            if !form.creating() {
-                continue;
-            }
             buffer.set_style(rect, style);
             let prefix = format!("{label:<10} ");
             let width = display_width(&prefix).min(rect.width);

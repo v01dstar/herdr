@@ -56,7 +56,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         .config
         .remote
         .manage_ssh_config;
-    let require_surface_interest = crate::client::endpoint::EndpointCatalog::load()
+    let require_surface_interest = crate::client::locations::effective_catalog()
         .map(|catalog| catalog.contains_enabled_target_session(&remote.target, &session_name))
         .unwrap_or(false);
     let remote_ssh = RemoteSsh::new(

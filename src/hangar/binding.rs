@@ -1,6 +1,6 @@
 //! A saved remote bound to a hangar machine, and its SSH preparation.
 //!
-//! The saved SSH profile's target is the alias `hangar-<machineId>`. Before herdr starts
+//! A hangar machine's remote targets the alias `hangar-<machineId>`. Before herdr starts
 //! `ssh` for such a target it checks that the machine is running (it never starts one),
 //! makes sure a certificate is available, and writes the `Host` block into herdr's
 //! temporary SSH config. Other targets are untouched.
@@ -14,7 +14,7 @@ use super::certs::{self, SshPaths};
 
 const ALIAS_PREFIX: &str = "hangar-";
 
-/// Stored in `client/locations.json` next to the profile it belongs to.
+/// A hangar machine as Herdr reaches it; built from the synced machine list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct HangarBinding {
@@ -82,7 +82,7 @@ pub(crate) fn is_hangar_target(target: &str) -> bool {
     machine_id_for_target(target).is_some()
 }
 
-/// The saved binding for `target`, or one on the default server for an alias that
+/// The listed machine for `target`, or one on the default server for an alias that
 /// was typed directly (`herdr --remote hangar-m_…`).
 fn binding_for_target(target: &str, machine_id: &str) -> io::Result<HangarBinding> {
     if let Some(binding) =
@@ -125,7 +125,14 @@ pub(crate) fn prepare_ssh_target(target: &str) -> io::Result<Option<String>> {
     let client = super::auth::shared_client(&binding.server).map_err(HangarError::into_io)?;
     prepare_with(&binding, &client, &SshPaths::herdr(), SystemTime::now())
         .map(Some)
-        .map_err(HangarError::into_io)
+        .map_err(|error| {
+            // Deleted, stopped or unreachable: refresh the list so a deleted machine
+            // disappears and a stopped one stops reconnecting.
+            if !error.needs_sign_in() {
+                crate::client::locations::sync::after_connection_failure(&binding);
+            }
+            error.into_io()
+        })
 }
 
 /// Run before every new `ssh` process for a hangar target whose `Host` block was

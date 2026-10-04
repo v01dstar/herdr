@@ -1,9 +1,9 @@
-//! Add remote: a hangar machine (sign in, then pick an existing machine or create one)
-//! or a manual SSH profile. HTTP and SSH run in workers; results carry the dialog
+//! Add remote: a new hangar machine (sign in, then create one; existing machines are
+//! listed in Settings → remotes on their own) or a manual SSH profile. HTTP and SSH run in workers; results carry the dialog
 //! epoch so a late result never overrides a newer dialog or selection.
 use super::*;
 use crate::client::locations::hangar::{self as machines, MachineSource};
-use crate::hangar::api::{HangarError, Image, Machine, MachineState};
+use crate::hangar::api::{HangarError, Image, Machine};
 use crate::hangar::login::SignInStep;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,21 +17,13 @@ pub(in crate::client::shell) const IMAGE_ACTION_FIELD: usize = 4;
 const FIELDS: usize = 5;
 const TEMPLATE_SOURCE: &str = "Latest herdr template";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::client::shell) enum MachineChoice {
-    New,
-    Existing(String),
-}
-
 #[derive(Clone, Debug)]
 pub(in crate::client::shell) struct AddRemoteForm {
     server: String,
+    /// The account's machines, to name the machine an image was saved from.
     machines: Vec<Machine>,
-    /// Machine IDs that already have a saved remote on this server.
-    bound: Vec<String>,
     /// The caller's images, newest first; empty when hangar could not list them.
     images: Vec<Image>,
-    pub(in crate::client::shell) choice: MachineChoice,
     pub(in crate::client::shell) source: MachineSource,
     pub(in crate::client::shell) dropdown: Option<(usize, usize)>,
     loading: bool,
@@ -45,9 +37,7 @@ impl Default for AddRemoteForm {
         Self {
             server: String::new(),
             machines: Vec::new(),
-            bound: Vec::new(),
             images: Vec::new(),
-            choice: MachineChoice::New,
             source: MachineSource::Template,
             dropdown: None,
             loading: true,
@@ -55,15 +45,6 @@ impl Default for AddRemoteForm {
             sign_in: None,
         }
     }
-}
-
-fn machine_label(machine: &Machine, bound: bool) -> String {
-    let state = match machine.state {
-        MachineState::Running => String::new(),
-        state => format!(" · {}", state.as_str()),
-    };
-    let added = if bound { " (added)" } else { "" };
-    format!("{}{state}{added}", machine.name)
 }
 
 /// `2026-10-03T08:00:00Z` → `2026-10-03`.
@@ -111,58 +92,23 @@ impl AddRemoteForm {
     /// The image chosen as source, offered for deletion.
     pub(in crate::client::shell) fn deletable_image(&self) -> Option<&Image> {
         match &self.source {
-            MachineSource::Image { id, .. } if self.signed_in && self.creating() => self.image(id),
+            MachineSource::Image { id, .. } if self.signed_in => self.image(id),
             _ => None,
         }
-    }
-
-    fn selections(&self) -> Vec<MachineChoice> {
-        std::iter::once(MachineChoice::New)
-            .chain(
-                self.machines
-                    .iter()
-                    .map(|machine| MachineChoice::Existing(machine.id.clone())),
-            )
-            .collect()
     }
 
     fn machine(&self, id: &str) -> Option<&Machine> {
         self.machines.iter().find(|machine| machine.id == id)
     }
 
-    /// The selected machine when no Herdr remote uses it, so it can be deleted here.
-    pub(in crate::client::shell) fn deletable(&self) -> Option<&Machine> {
-        match &self.choice {
-            MachineChoice::Existing(id) if self.signed_in && !self.bound.contains(id) => {
-                self.machine(id)
-            }
-            _ => None,
-        }
-    }
-
-    pub(in crate::client::shell) fn creating(&self) -> bool {
-        self.choice == MachineChoice::New
-    }
-
     pub(in crate::client::shell) fn edits_name(&self) -> bool {
-        self.signed_in && self.creating() && self.dropdown.is_none()
+        self.signed_in && self.dropdown.is_none()
     }
 
     pub(in crate::client::shell) fn options(&self, field: usize) -> Vec<String> {
         match field {
             0 => vec!["hangar".into(), "SSH".into()],
-            1 if self.signed_in => self
-                .selections()
-                .iter()
-                .map(|choice| match choice {
-                    MachineChoice::New => "＋ Create new machine".into(),
-                    MachineChoice::Existing(id) => self
-                        .machine(id)
-                        .map(|machine| machine_label(machine, self.bound.contains(id)))
-                        .unwrap_or_default(),
-                })
-                .collect(),
-            SOURCE_FIELD if self.signed_in && self.creating() => self
+            SOURCE_FIELD if self.signed_in => self
                 .sources()
                 .iter()
                 .map(|source| self.source_label(source))
@@ -176,13 +122,7 @@ impl AddRemoteForm {
             0 => "hangar".into(),
             1 if self.loading => "Loading…".into(),
             1 if !self.signed_in => "Sign in to list machines".into(),
-            1 => match &self.choice {
-                MachineChoice::New => "＋ Create new machine".into(),
-                MachineChoice::Existing(id) => self
-                    .machine(id)
-                    .map(|machine| machine_label(machine, self.bound.contains(id)))
-                    .unwrap_or_else(|| "Machine no longer listed".into()),
-            },
+            1 => "＋ Create new machine".into(),
             SOURCE_FIELD => self.source_label(&self.source),
             _ => String::new(),
         }
@@ -191,37 +131,24 @@ impl AddRemoteForm {
     pub(in crate::client::shell) fn primary_label(&self) -> &'static str {
         if !self.signed_in {
             " sign in "
-        } else if self.creating() {
-            " create and connect "
         } else {
-            " connect "
+            " create and connect "
         }
     }
 
     pub(in crate::client::shell) fn can_submit(&self) -> bool {
         !self.loading
             && (!self.signed_in
-                || match &self.choice {
-                    MachineChoice::New => match &self.source {
-                        MachineSource::Template => true,
-                        MachineSource::Image { id, .. } => self.image(id).is_some(),
-                    },
-                    MachineChoice::Existing(id) => {
-                        self.machine(id).is_some() && !self.bound.contains(id)
-                    }
+                || match &self.source {
+                    MachineSource::Template => true,
+                    MachineSource::Image { id, .. } => self.image(id).is_some(),
                 })
     }
 
     fn open_dropdown(&mut self, field: usize) {
-        let available = field == 0
-            || ((field == 1 || field == SOURCE_FIELD) && !self.loading && self.signed_in);
+        let available = field == 0 || (field == SOURCE_FIELD && !self.loading && self.signed_in);
         if available && !self.options(field).is_empty() {
             let selected = match field {
-                1 => self
-                    .selections()
-                    .iter()
-                    .position(|choice| choice == &self.choice)
-                    .unwrap_or(0),
                 SOURCE_FIELD => self
                     .sources()
                     .iter()
@@ -233,20 +160,8 @@ impl AddRemoteForm {
         }
     }
 
-    /// A refreshed list keeps the user's choices while that machine and image are still
-    /// listed.
-    fn apply_machines(
-        &mut self,
-        server: String,
-        machines: Vec<Machine>,
-        bound: Vec<String>,
-        images: Vec<Image>,
-    ) {
-        if let MachineChoice::Existing(id) = &self.choice {
-            if !machines.iter().any(|machine| &machine.id == id) {
-                self.choice = MachineChoice::New;
-            }
-        }
+    /// A refreshed list keeps the chosen image while it is still listed.
+    fn apply_machines(&mut self, server: String, machines: Vec<Machine>, images: Vec<Image>) {
         if let MachineSource::Image { id, .. } = &self.source {
             if !images.iter().any(|image| &image.id == id) {
                 self.source = MachineSource::Template;
@@ -254,7 +169,6 @@ impl AddRemoteForm {
         }
         self.server = server;
         self.machines = machines;
-        self.bound = bound;
         self.images = images;
         self.loading = false;
         self.signed_in = true;
@@ -266,7 +180,6 @@ enum Discovery {
     Machines {
         server: String,
         result: Result<Vec<Machine>, HangarError>,
-        bound: Vec<String>,
         images: Vec<Image>,
     },
     SignIn(SignInStep),
@@ -307,26 +220,12 @@ impl AddRemoteController {
     }
 }
 
-const UNBOUND_HINT: &str = "No Herdr remote uses it; Delete machine… deletes it instead.";
+const EXISTING_HINT: &str =
+    "Your existing hangar machines are listed in Settings → remotes on their own.";
 const CREATE_HINT: &str = "Creates a hangar machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from Settings → remotes.";
 
 fn image_hint(name: &str) -> String {
     format!("Creates a hangar machine from image {name}: the packages and system configuration saved in it, with a new, empty /data (no home directory files, logins or workspace). Delete image… removes the image.")
-}
-
-fn bound_machines(server: &str) -> Vec<String> {
-    LocationPreferences::load()
-        .map(|prefs| {
-            prefs
-                .remotes
-                .values()
-                .filter_map(|options| options.cloud.as_ref())
-                .map(|cloud| cloud.hangar())
-                .filter(|binding| binding.server == server)
-                .map(|binding| binding.machine_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn list_worker(send: &mpsc::Sender<Discovery>) {
@@ -342,11 +241,9 @@ fn list_worker(send: &mpsc::Sender<Discovery>) {
     } else {
         Vec::new()
     };
-    let bound = bound_machines(&server);
     let _ = send.send(Discovery::Machines {
         server,
         result,
-        bound,
         images,
     });
 }
@@ -417,32 +314,6 @@ impl ClientShellState {
                 self.locations.add.cancel_sign_in();
                 self.edit_location(None);
             }
-            1 => {
-                if let Some(choice) = form.selections().get(index).cloned() {
-                    let message = match &choice {
-                        MachineChoice::New => CREATE_HINT.to_owned(),
-                        MachineChoice::Existing(id) if form.bound.contains(id) => {
-                            "This machine is already added. Select it in Settings → remotes.".into()
-                        }
-                        MachineChoice::Existing(id) => match form.machine(id) {
-                            Some(machine) if machine.state == MachineState::Running => {
-                                format!("Connects to the machine's Herdr session. Its files are kept. {UNBOUND_HINT}")
-                            }
-                            Some(machine) => format!(
-                                "{} is {}. It is saved without starting it; use Start remote when you need it. {UNBOUND_HINT}",
-                                machine.name,
-                                machine.state.as_str()
-                            ),
-                            None => String::new(),
-                        },
-                    };
-                    if choice == MachineChoice::New {
-                        dialog.selected = NAME_FIELD;
-                    }
-                    form.choice = choice;
-                    dialog.message = message;
-                }
-            }
             SOURCE_FIELD => {
                 if let Some(source) = form.sources().get(index).cloned() {
                     dialog.message = match &source {
@@ -483,25 +354,17 @@ impl ClientShellState {
             return;
         }
         if !form.can_submit() {
-            dialog.message = if form.creating() {
-                "The chosen image is no longer listed. Choose another source.".into()
-            } else {
-                "Choose a machine that is not added yet, or create a new one.".into()
-            };
+            dialog.message = "The chosen image is no longer listed. Choose another source.".into();
             return;
         }
         let server = form.server.clone();
         let source = form.source.clone();
-        let existing = match &form.choice {
-            MachineChoice::New => None,
-            MachineChoice::Existing(id) => form.machine(id).cloned(),
-        };
         let name = dialog
             .fields
             .first()
             .map(|field| field.trim().to_owned())
             .unwrap_or_default();
-        if existing.is_none() && name.is_empty() {
+        if name.is_empty() {
             dialog.selected = NAME_FIELD;
             dialog.message = "Enter a name for the new machine.".into();
             return;
@@ -519,38 +382,12 @@ impl ClientShellState {
                 let _ = send.send(SetupEvent::Progress(message));
             };
             let result = (|| {
-                let machine = match existing {
-                    Some(machine) => machine,
-                    None => machines::create_machine(&server, &name, &source, &mut progress)
-                        .map_err(|error| error.to_string())?,
-                };
-                machines::add_machine(&server, &machine, &mut progress)
+                let machine = machines::create_machine(&server, &name, &source, &mut progress)
+                    .map_err(|error| error.to_string())?;
+                machines::adopt_machine(&server, &machine, &mut progress)
             })();
             let _ = send.send(SetupEvent::Finished(result));
         });
-    }
-
-    /// Delete machine… for a hangar machine that no Herdr remote uses.
-    fn confirm_delete_unbound(&mut self) {
-        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
-            return;
-        };
-        let LocationDialogKind::Add(form) = &dialog.kind else {
-            return;
-        };
-        let Some(machine) = form.deletable() else {
-            return;
-        };
-        match HangarBinding::new(&form.server, &machine.id, &machine.name) {
-            Ok(binding) => {
-                self.locations.add.cancel_sign_in();
-                self.confirm_delete(DeleteRequest {
-                    binding,
-                    remote: None,
-                });
-            }
-            Err(error) => dialog.message = error,
-        }
     }
 
     /// Delete image… for the image chosen as source.
@@ -614,13 +451,9 @@ impl ClientShellState {
                 dialog.selected = (dialog.selected + FIELDS) % (FIELDS + 1)
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ')
-                if dialog.selected < NAME_FIELD
-                    || (dialog.selected == SOURCE_FIELD && form.creating()) =>
+                if dialog.selected == 0 || dialog.selected == SOURCE_FIELD =>
             {
                 form.open_dropdown(dialog.selected)
-            }
-            KeyCode::Enter if dialog.selected == NAME_FIELD && form.deletable().is_some() => {
-                self.confirm_delete_unbound()
             }
             KeyCode::Enter
                 if dialog.selected == IMAGE_ACTION_FIELD && form.deletable_image().is_some() =>
@@ -697,7 +530,6 @@ impl ClientShellState {
                     self.select_add_option(field, index - 1000);
                 }
             }
-            Some(NAME_FIELD) if form.deletable().is_some() => self.confirm_delete_unbound(),
             Some(IMAGE_ACTION_FIELD) => self.confirm_delete_image(),
             Some(field) => {
                 dialog.selected = field;
@@ -746,15 +578,10 @@ impl ClientShellState {
                 Discovery::Machines {
                     server,
                     result: Ok(list),
-                    bound,
                     images,
                 } => {
-                    form.apply_machines(server, list, bound, images);
-                    dialog.message = if form.machines.is_empty() {
-                        format!("No machines yet. {CREATE_HINT}")
-                    } else {
-                        "Choose a machine, or create a new one.".into()
-                    };
+                    form.apply_machines(server, list, images);
+                    dialog.message = format!("{CREATE_HINT} {EXISTING_HINT}");
                 }
                 Discovery::Machines {
                     server,
@@ -858,7 +685,6 @@ mod tests {
                 listed(ID, "box", "running"),
                 listed("m_bbbbbbbbbbbbbbbbbbbbbbbbbb", "cold", "stopped"),
             ],
-            Vec::new(),
             images(),
         );
         form
@@ -925,7 +751,6 @@ mod tests {
         Discovery::Machines {
             server: server.into(),
             result,
-            bound: Vec::new(),
             images: Vec::new(),
         }
     }
@@ -950,10 +775,6 @@ mod tests {
             Some("im_old")
         );
         assert!(form.can_submit());
-        // Only creating a machine has a source.
-        form.choice = MachineChoice::Existing(ID.into());
-        assert!(form.options(SOURCE_FIELD).is_empty());
-        assert!(form.deletable_image().is_none());
     }
 
     #[test]
@@ -1004,7 +825,6 @@ mod tests {
         let refresh = |images: Vec<Image>| Discovery::Machines {
             server: "https://hangar.test".into(),
             result: Ok(vec![listed(ID, "box", "running")]),
-            bound: Vec::new(),
             images,
         };
         let (send, receive) = mpsc::channel();
@@ -1046,73 +866,21 @@ mod tests {
     }
 
     #[test]
-    fn stopped_machines_are_marked_and_added_ones_cannot_be_submitted() {
-        let mut form = form();
-        let options = form.options(1);
-        assert_eq!(options[0], "＋ Create new machine");
-        assert_eq!(options[1], "box");
-        assert_eq!(options[2], "cold · stopped");
-        form.bound = vec![ID.into()];
-        form.choice = MachineChoice::Existing(ID.into());
-        assert!(form.options(1)[1].ends_with("(added)"));
-        assert!(!form.can_submit());
-        form.choice = MachineChoice::New;
-        assert!(form.can_submit());
+    fn add_remote_only_creates_machines_and_existing_ones_are_not_offered() {
+        let form = form();
+        assert!(form.options(1).is_empty(), "no machine to pick");
+        assert_eq!(form.label(1), "＋ Create new machine");
         assert_eq!(form.primary_label(), " create and connect ");
+        assert!(form.can_submit());
         let signed_out = AddRemoteForm {
             loading: false,
             ..AddRemoteForm::default()
         };
         assert_eq!(signed_out.primary_label(), " sign in ");
-        assert!(signed_out.options(1).is_empty());
-    }
-
-    #[test]
-    fn an_unbound_machine_can_be_deleted_after_confirmation() {
-        let mut state = shell_with(form());
-        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
-            if let LocationDialogKind::Add(form) = &mut dialog.kind {
-                form.choice = MachineChoice::Existing(ID.into());
-                form.bound = vec![ID.into()];
-                assert!(
-                    form.deletable().is_none(),
-                    "added machines are removed from remotes"
-                );
-                form.bound.clear();
-            }
-            dialog.selected = NAME_FIELD;
-        }
+        // The provider dropdown still opens; Escape closes it before the dialog.
+        let mut state = shell_with(form);
         key(&mut state, KeyCode::Enter);
-        let Some(ClientShellOverlay::Locations(dialog)) = &state.overlay else {
-            panic!("dialog");
-        };
-        let LocationDialogKind::Delete(request) = &dialog.kind else {
-            panic!("delete confirmation");
-        };
-        assert_eq!(request.binding.machine_id, ID);
-        assert!(request.remote.is_none());
-        assert!(dialog.message.contains("'box'"));
-        assert!(dialog.message.contains("permanently deleted"));
-        assert!(!state.locations.add.running());
-        assert!(
-            state.locations.job.is_none(),
-            "nothing runs before confirmation"
-        );
-    }
-
-    #[test]
-    fn keyboard_dropdown_selects_a_machine_and_escape_closes_dropdown_first() {
-        let mut state = shell_with(form());
-        key(&mut state, KeyCode::Down);
-        key(&mut state, KeyCode::Enter);
-        key(&mut state, KeyCode::Down);
-        key(&mut state, KeyCode::Enter);
-        assert_eq!(
-            current_form(&state).choice,
-            MachineChoice::Existing(ID.into())
-        );
-        assert!(!state.locations.add.running());
-        key(&mut state, KeyCode::Enter);
+        assert_eq!(current_form(&state).dropdown, Some((0, 0)));
         key(&mut state, KeyCode::Esc);
         assert!(state.overlay.is_some());
         key(&mut state, KeyCode::Esc);
@@ -1120,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn name_field_takes_typing_only_when_creating() {
+    fn name_field_takes_typing() {
         let mut state = shell_with(form());
         if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
             dialog.selected = NAME_FIELD;
@@ -1131,10 +899,6 @@ mod tests {
             panic!("dialog");
         };
         assert_eq!(dialog.fields[0].as_str(), "abc");
-        if let LocationDialogKind::Add(form) = &mut dialog.kind {
-            form.choice = MachineChoice::Existing(ID.into());
-        }
-        assert!(dialog.editor_mut().is_none());
     }
 
     #[test]
@@ -1157,7 +921,7 @@ mod tests {
             .hits
             .settings_choices
             .iter()
-            .find(|(_, i)| *i == 1)
+            .find(|(_, i)| *i == SOURCE_FIELD)
             .unwrap()
             .0;
         assert!(state.route_add_remote_mouse(
@@ -1170,20 +934,15 @@ mod tests {
             &mut ClientShellInput::default()
         ));
         key(&mut state, KeyCode::Down);
-        assert_eq!(current_form(&state).dropdown, Some((1, 1)));
+        assert_eq!(current_form(&state).dropdown, Some((SOURCE_FIELD, 1)));
         state.compose(110, 35).unwrap();
         assert!(state.hits.settings_choices.iter().any(|(_, i)| *i == 1001));
         assert!(!state.locations.add.running());
     }
 
     #[test]
-    fn stale_machine_list_does_not_override_a_newer_dialog_or_selection() {
+    fn stale_machine_list_does_not_override_a_newer_dialog() {
         let mut state = shell_with(form());
-        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
-            if let LocationDialogKind::Add(form) = &mut dialog.kind {
-                form.choice = MachineChoice::Existing(ID.into());
-            }
-        }
         // A result from an earlier dialog is dropped.
         let (send, receive) = mpsc::channel();
         state.locations.add.discovery = Some((state.locations.epoch.wrapping_sub(1), receive));
@@ -1192,7 +951,6 @@ mod tests {
         state.tick_add_remote(&mut ClientShellInput::default());
         assert_eq!(current_form(&state).server, "https://hangar.test");
         assert_eq!(current_form(&state).machines.len(), 2);
-        // A current refresh keeps the selected machine while it is still listed.
         let (send, receive) = mpsc::channel();
         state.locations.add.discovery = Some((state.locations.epoch, receive));
         send.send(machines_event(
@@ -1201,10 +959,11 @@ mod tests {
         ))
         .unwrap();
         state.tick_add_remote(&mut ClientShellInput::default());
-        assert_eq!(
-            current_form(&state).choice,
-            MachineChoice::Existing(ID.into())
-        );
+        assert_eq!(current_form(&state).machines.len(), 1);
+        let Some(ClientShellOverlay::Locations(dialog)) = &state.overlay else {
+            panic!("dialog");
+        };
+        assert!(dialog.message.contains("listed in Settings → remotes"));
     }
 
     #[test]

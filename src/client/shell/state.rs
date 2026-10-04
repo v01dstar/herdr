@@ -1850,6 +1850,16 @@ impl ClientShellState {
         repaint
     }
 
+    /// Shows a transient notice about an endpoint (such as a deleted machine).
+    pub(crate) fn notify_endpoint(&mut self, message: impl Into<String>) {
+        self.set_endpoint_error(message);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn endpoint_notice(&self) -> Option<&str> {
+        self.endpoint_error.as_deref()
+    }
+
     /// Show a transient client-side action error, restarting its lifetime.
     ///
     /// Every assignment must go through this setter so a repeated identical

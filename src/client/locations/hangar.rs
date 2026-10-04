@@ -5,8 +5,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{operation_lock, CloudBinding, LocationPreferences, RemoteOptions};
-use crate::client::endpoint::{EndpointCatalog, SavedSshEndpoint, MAX_LABEL_BYTES};
 use crate::hangar::api::{
     Client, CreateImageRequest, CreateMachineRequest, CurlHttp, ErrorCode, ForkMachineRequest,
     HangarError, Image, Machine, MachineState, Operation, OperationState, Template,
@@ -724,14 +722,6 @@ pub(crate) fn suspend_machine(
     )
 }
 
-/// Current states of the given machines on `server`, for labels such as Resume remote.
-pub(crate) fn machine_states(server: &str) -> Result<Vec<(String, MachineState)>, HangarError> {
-    Ok(list_machines(server)?
-        .into_iter()
-        .map(|machine| (machine.id, machine.state))
-        .collect())
-}
-
 pub(crate) fn delete_machine(
     binding: &HangarBinding,
     progress: Progress<'_>,
@@ -830,82 +820,22 @@ pub(crate) fn resolve_machine(server: &str, selector: &str) -> Result<Machine, S
     }
 }
 
-fn unique_label(catalog: &EndpointCatalog, wanted: &str) -> String {
-    let base: String = wanted.chars().take(MAX_LABEL_BYTES / 4).collect();
-    let base = if base.trim().is_empty() {
-        "hangar".to_owned()
-    } else {
-        base
-    };
-    let taken = |label: &str| catalog.ssh.iter().any(|profile| profile.label == label);
-    if !taken(&base) {
-        return base;
-    }
-    (2..)
-        .map(|suffix| format!("{base} ({suffix})"))
-        .find(|label| !taken(label))
-        .unwrap_or(base)
-}
-
-/// Saves a profile for `machine` whose target is its hangar alias. Rejects a
-/// machine that is already bound to another profile.
-pub(crate) fn save_binding(
-    server: &str,
-    machine: &Machine,
-    label: Option<&str>,
-    session: &str,
-    enabled: bool,
-) -> Result<(SavedSshEndpoint, RemoteOptions), String> {
-    let binding = HangarBinding::new(server, &machine.id, &machine.name)?;
-    let _guard = operation_lock()?;
-    let mut prefs = LocationPreferences::load()?;
-    if prefs
-        .remotes
-        .values()
-        .filter_map(|options| options.cloud.as_ref())
-        .any(|cloud| {
-            cloud.hangar().machine_id == binding.machine_id
-                && cloud.hangar().server == binding.server
-        })
-    {
-        return Err(format!(
-            "{} is already added. Select it in Settings → remotes.",
-            machine.name
-        ));
-    }
-    let mut catalog = EndpointCatalog::load()?;
-    if catalog.ssh.len() >= 64 {
-        return Err("At most 64 remotes can be saved".into());
-    }
-    let label = match label {
-        Some(label) => label.to_owned(),
-        None => unique_label(&catalog, &machine.name),
-    };
-    let mut profile = SavedSshEndpoint::new(label, &binding.alias, session)?;
-    profile.enabled = enabled;
-    let options = RemoteOptions {
-        cwd: String::new(),
-        cloud: Some(CloudBinding::Hangar(binding)),
-    };
-    prefs.remotes.insert(profile.id.clone(), options.clone());
-    // Metadata first: the profile must not appear without its binding.
-    prefs.store()?;
-    catalog.ssh.push(profile.clone());
-    catalog.store_profiles()?;
-    Ok((profile, options))
-}
-
-/// Binds a machine and, when it is running, starts its Herdr session and enables
-/// automatic connection. A stopped machine is saved disabled and left stopped.
-pub(crate) fn add_machine(
+/// Lists a machine hangar just created or forked (before the next sync) and, when it is
+/// running, starts its Herdr session so clients connect.
+pub(crate) fn adopt_machine(
     server: &str,
     machine: &Machine,
     progress: Progress<'_>,
 ) -> Result<String, String> {
-    let (profile, options) = save_binding(server, machine, None, SESSION, false)?;
+    super::sync::record_listed(server, machine)?;
+    let remotes = super::Remotes::load()?;
+    let remote = remotes
+        .machine(&crate::hangar::normalize_server(server), &machine.id)
+        .ok_or("hangar machine is not listed")?;
+    let (profile, options) = (remote.profile.clone(), remote.options());
     if machine.state != MachineState::Running {
         return Ok(format!(
-            "{} was saved. It is {}; use Start remote to start it.",
+            "{} is listed. It is {}; use Start remote to start it.",
             profile.label,
             machine.state.as_str()
         ));
@@ -913,7 +843,7 @@ pub(crate) fn add_machine(
     progress(format!("Connecting to {}…", machine.name));
     super::start_session(&profile, &options).map_err(|error| {
         format!(
-            "{} was saved but not connected: {error} Use Start remote to retry.",
+            "{} is listed but not connected: {error} Use Start remote to retry.",
             profile.label
         )
     })?;

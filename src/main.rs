@@ -794,7 +794,7 @@ fn main() -> io::Result<()> {
     exit_if_nested_disabled(&loaded_config.config);
 
     let saved_federation =
-        client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
+        client::locations::effective_catalog().is_ok_and(|catalog| catalog.has_enabled_ssh());
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
         eprintln!("herdr: {err}");
         std::process::exit(1);

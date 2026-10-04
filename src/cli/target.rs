@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::io;
 
 use crate::api::client::{ApiClient, ConnectionTarget};
-use crate::client::endpoint::{EndpointCatalog, SavedSshEndpoint};
+use crate::client::endpoint::SavedSshEndpoint;
 
 thread_local! {
     // CLI dispatch is synchronous. Scope routing to this command, never the runtime or TUI.
@@ -37,7 +37,10 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
         if super::spec::print_requested_help(&args)? {
             return Ok(super::CommandOutcome::Handled(0));
         }
-        let profiles = EndpointCatalog::load_profiles().map_err(io::Error::other)?;
+        // Saved SSH machines and listed hangar machines (hidden ones too).
+        let profiles = crate::client::locations::Remotes::load()
+            .map_err(io::Error::other)?
+            .profiles(true);
         let profile = match resolve_machine(&profiles, &selector) {
             Ok(profile) => profile.clone(),
             Err(error) => return usage_error(error),

@@ -12,7 +12,6 @@ const HELP: &str = "Usage:
   herdr machine status [<label-or-id>] [--json]
   herdr machine reconnect <label-or-id>
   herdr machine add <ssh-target> [--label <label>] [--remote-session <name>]
-  herdr machine add <hangar-machine> --hangar [--label <label>] [--remote-session <name>]
   herdr machine rename <profile-id> --label <label>
   herdr machine remove <profile-id> [--delete-machine]
   herdr machine enable <profile-id>
@@ -24,20 +23,36 @@ Changes apply automatically to open local Herdr clients.
 Removing or disabling an SSH machine leaves its remote sessions running.
 Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
 SSH credentials and key material remain owned by OpenSSH.
-With --hangar, the machine is reached through the hangar gateway with short-lived
-certificates, using the sign-in shared with the hangar CLI. Stopped machines are
-saved disabled and never started. Removing a hangar machine deletes it in hangar,
-with its disks and snapshots, and removes every saved machine bound to it; this
-cannot be undone, so it requires --delete-machine.";
+
+hangar machines are not saved: Herdr lists every machine of the hangar account you are
+signed in to (shared with the hangar CLI) and connects the running ones through the
+hangar gateway with short-lived certificates. Machines created or deleted elsewhere
+appear and disappear automatically; `list` refreshes the list first. For a hangar
+machine, rename sets the name Herdr shows, disable hides it from the sidebar (it is not
+connected) and enable shows it again. It cannot be removed from Herdr alone: remove
+--delete-machine deletes it in hangar, with its disks and snapshots, which cannot be
+undone.";
 
 #[derive(Serialize)]
-struct MachineListRow<'a> {
-    id: &'a str,
-    label: &'a str,
-    target: &'a str,
-    session: &'a str,
+struct MachineListRow {
+    id: String,
+    label: String,
+    target: String,
+    session: String,
     enabled: bool,
     selected: bool,
+    /// `ssh` (saved here) or `hangar` (listed from the hangar account).
+    source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<String>,
+    /// The hangar machine state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hidden: bool,
+    /// Why a hangar list may be outdated (`offline`, `signed out`, `not synced yet`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sync: Option<&'static str>,
 }
 
 pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
@@ -70,19 +85,17 @@ fn list(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
-    let catalog = load_catalog()?;
-    let rows = catalog
-        .ssh
-        .iter()
-        .map(|profile| MachineListRow {
-            id: profile.id.as_str(),
-            label: &profile.label,
-            target: &profile.target,
-            session: &profile.session,
-            enabled: profile.enabled,
-            selected: catalog.selected_profile.as_ref() == Some(&profile.id),
-        })
-        .collect::<Vec<_>>();
+    // The hangar account is the truth for hangar machines; a failed fetch keeps the
+    // last list and marks it.
+    let report = crate::client::locations::sync::sync_now();
+    for error in &report.errors {
+        eprintln!("warning: showing the last synced hangar machines: {error}");
+    }
+    let remotes = load_remotes()?;
+    let selected = crate::client::locations::effective_catalog()
+        .ok()
+        .and_then(|catalog| catalog.selected_profile);
+    let rows = list_rows(&remotes, selected.as_ref());
     if json {
         println!(
             "{}",
@@ -91,17 +104,63 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         return Ok(0);
     }
     if rows.is_empty() {
-        println!("No saved SSH machines.");
+        println!("No saved SSH machines or hangar machines.");
         return Ok(0);
     }
     for row in rows {
-        let state = if row.enabled { "enabled" } else { "disabled" };
+        let state = match row.state {
+            None if row.enabled => "enabled".to_owned(),
+            None => "disabled".to_owned(),
+            Some(state) => {
+                let mut text = format!("hangar {state}");
+                if row.hidden {
+                    text.push_str(", hidden");
+                }
+                if let Some(note) = row.sync {
+                    text.push_str(&format!(", {note}"));
+                }
+                text
+            }
+        };
         println!(
             "{}\t{}\t{}\t{}\t{}",
             row.id, row.label, row.target, row.session, state
         );
     }
     Ok(0)
+}
+
+fn list_rows(
+    remotes: &crate::client::locations::Remotes,
+    selected: Option<&ProfileId>,
+) -> Vec<MachineListRow> {
+    let ssh = remotes.ssh.iter().map(|profile| MachineListRow {
+        id: profile.id.to_string(),
+        label: profile.label.clone(),
+        target: profile.target.clone(),
+        session: profile.session.clone(),
+        enabled: profile.enabled,
+        selected: selected == Some(&profile.id),
+        source: "ssh",
+        server: None,
+        state: None,
+        hidden: false,
+        sync: None,
+    });
+    let hangar = remotes.hangar.iter().map(|remote| MachineListRow {
+        id: remote.profile.id.to_string(),
+        label: remote.profile.label.clone(),
+        target: remote.profile.target.clone(),
+        session: remote.profile.session.clone(),
+        enabled: remote.profile.enabled,
+        selected: selected == Some(&remote.profile.id),
+        source: "hangar",
+        server: Some(remote.binding.server.clone()),
+        state: Some(remote.state.as_str()),
+        hidden: remote.hidden,
+        sync: remote.sync.note(),
+    });
+    ssh.chain(hangar).collect()
 }
 
 #[derive(Serialize)]
@@ -125,16 +184,16 @@ fn status(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     }
-    let catalog = load_catalog()?;
+    let all = load_remotes()?.profiles(true);
     let profiles = match selector {
-        Some(selector) => match super::target::resolve_machine(&catalog.ssh, selector) {
+        Some(selector) => match super::target::resolve_machine(&all, selector) {
             Ok(profile) => vec![profile],
             Err(error) => {
                 eprintln!("{error}");
                 return Ok(2);
             }
         },
-        None => catalog.ssh.iter().collect(),
+        None => all.iter().collect(),
     };
     let rows = profiles
         .into_iter()
@@ -188,8 +247,8 @@ fn reconnect(args: &[String]) -> std::io::Result<i32> {
         eprintln!("usage: herdr machine reconnect <label-or-id>");
         return Ok(2);
     };
-    let catalog = load_catalog()?;
-    let profile = match super::target::resolve_machine(&catalog.ssh, selector) {
+    let all = load_remotes()?.profiles(true);
+    let profile = match super::target::resolve_machine(&all, selector) {
         Ok(profile) => profile,
         Err(error) => {
             eprintln!("{error}");
@@ -408,15 +467,17 @@ fn add(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
-/// Binds a hangar machine. A running machine is prepared like any SSH machine (with
-/// installation approval when needed) before it is saved; a stopped one is saved
-/// disabled and left stopped.
+/// hangar machines are listed from the account, not added: this checks the machine is
+/// listed and says where it is.
 fn add_hangar(
     selector: &str,
     label: Option<String>,
     session: Option<String>,
 ) -> std::io::Result<i32> {
     use crate::client::locations::hangar as machines;
+    if label.is_some() || session.is_some() {
+        eprintln!("note: hangar machines are not saved, so --label and --remote-session are ignored; use `herdr machine rename` to rename one.");
+    }
     let server = crate::hangar::default_server();
     let machine = match machines::resolve_machine(&server, selector) {
         Ok(machine) => machine,
@@ -425,52 +486,22 @@ fn add_hangar(
             return Ok(1);
         }
     };
-    let session = session.unwrap_or_else(|| machines::SESSION.to_owned());
-    let running = machine.state == crate::hangar::api::MachineState::Running;
-    let alias = crate::hangar::binding::alias_for(&machine.id);
-    let metadata = if running {
-        match crate::remote::SavedSshSetup::connect(&alias)
-            .and_then(|setup| setup.prepare(&session))
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                eprintln!("error: {error}; machine was not saved");
-                return Ok(1);
-            }
-        }
-    } else {
-        None
-    };
-    let (profile, _) =
-        match machines::save_binding(&server, &machine, label.as_deref(), &session, running) {
-            Ok(saved) => saved,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Ok(2);
-            }
-        };
-    if let Some(metadata) = metadata {
-        crate::client::endpoint::SshMetadataCache::new(
-            profile.id.as_str(),
-            &profile.target,
-            &profile.session,
-        )?
-        .store(&metadata);
+    let report =
+        crate::client::locations::sync::sync_with(std::slice::from_ref(&server), &|server| {
+            machines::list_machines(server)
+        });
+    for error in &report.errors {
+        eprintln!("warning: {error}");
     }
-    if running {
-        println!(
-            "Saved hangar machine {} as {}. Remote server is ready.",
-            machine.name, profile.id
-        );
-        println!("Open Herdr clients connect automatically.");
-    } else {
-        println!(
-            "Saved hangar machine {} as {} (disabled). It is {}; start it from Settings → remotes → Start remote.",
-            machine.name,
-            profile.id,
-            machine.state.as_str()
-        );
-    }
+    let id = load_remotes()?
+        .machine(&server, &machine.id)
+        .map(|remote| remote.profile.id.to_string());
+    println!(
+        "hangar machines appear automatically; nothing to add. {} ({}) is listed{}.",
+        machine.name,
+        machine.state.as_str(),
+        id.map(|id| format!(" as {id}")).unwrap_or_default()
+    );
     Ok(0)
 }
 
@@ -568,6 +599,28 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
+    let remotes = load_remotes()?;
+    if let Some(remote) = remotes.hangar_remote(&id) {
+        return match crate::client::locations::edit_machine_prefs(
+            &remote.binding,
+            Some(label),
+            None,
+            None,
+        ) {
+            Ok(()) => {
+                println!(
+                    "Renamed hangar machine {} to {} in Herdr (hangar keeps its name).",
+                    remote.binding.machine_name,
+                    label.trim()
+                );
+                Ok(0)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                Ok(2)
+            }
+        };
+    }
     let mut catalog = load_catalog()?;
     match catalog.rename_ssh(&id, label) {
         Ok(true) => {}
@@ -600,16 +653,12 @@ fn parse_remove_args(args: &[String]) -> (Vec<String>, bool) {
 
 /// A CLI cannot show the confirmation dialog, so deleting a hangar machine needs the
 /// explicit flag, and the flag is refused where there is no machine to delete.
-fn check_remove(
-    cloud: Option<&crate::client::locations::CloudBinding>,
-    bound_labels: &[&str],
-    delete_machine: bool,
-) -> Result<(), String> {
-    match (cloud, delete_machine) {
-        (Some(cloud), false) => Err(format!(
-            "this machine is bound to hangar machine '{}'. Removing it deletes that machine. {} Pass --delete-machine to confirm, or use Settings → remotes → Remove remote….",
-            cloud.hangar().machine_name,
-            crate::client::locations::delete_consequences(bound_labels)
+fn check_remove(machine_name: Option<&str>, delete_machine: bool) -> Result<(), String> {
+    match (machine_name, delete_machine) {
+        (Some(name), false) => Err(format!(
+            "{} Pass --delete-machine to delete it on hangar ({}), or run `herdr machine disable <profile-id>` to hide it.",
+            crate::client::locations::hangar_remove_refusal(name),
+            crate::client::locations::delete_consequences()
         )),
         (None, true) => Err(
             "--delete-machine applies only to hangar machines; this is an SSH machine".into(),
@@ -623,34 +672,24 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
     let Some(id) = one_profile_id(&args, REMOVE_USAGE)? else {
         return Ok(2);
     };
-    let mut catalog = load_catalog()?;
-    let prefs =
-        crate::client::locations::LocationPreferences::load().map_err(std::io::Error::other)?;
-    let cloud = prefs.binding(&id).cloned();
-    let bound = cloud
-        .as_ref()
-        .map(|cloud| crate::client::locations::machine_profiles(&catalog.ssh, &prefs, cloud))
-        .unwrap_or_default();
-    let labels = bound
-        .iter()
-        .map(|profile| profile.label.as_str())
-        .collect::<Vec<_>>();
-    if catalog.ssh.iter().any(|profile| profile.id == id) {
-        if let Err(error) = check_remove(cloud.as_ref(), &labels, delete_machine) {
+    let remotes = load_remotes()?;
+    let hangar = remotes.hangar_remote(&id);
+    let known = hangar.is_some() || remotes.ssh.iter().any(|profile| profile.id == id);
+    if known {
+        if let Err(error) = check_remove(
+            hangar.map(|remote| remote.binding.machine_name.as_str()),
+            delete_machine,
+        ) {
             eprintln!("error: {error}");
             return Ok(2);
         }
     }
-    if let (Some(profile), Some(options)) = (
-        catalog.ssh.iter().find(|profile| profile.id == id),
-        prefs
-            .remotes
-            .get(&id)
-            .filter(|options| options.cloud.is_some()),
-    ) {
-        return match crate::client::locations::delete_remote(profile, options, &mut |step| {
-            eprintln!("{step}")
-        }) {
+    if let Some(remote) = hangar {
+        return match crate::client::locations::delete_remote(
+            &remote.profile,
+            &remote.options(),
+            &mut |step| eprintln!("{step}"),
+        ) {
             Ok(message) => {
                 println!("{message}");
                 Ok(0)
@@ -661,6 +700,7 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
             }
         };
     }
+    let mut catalog = load_catalog()?;
     let previous_selection = catalog.selected_profile.clone();
     let metadata_cache = catalog
         .ssh
@@ -679,7 +719,7 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
         return Ok(1);
     }
     store_catalog(&catalog)?;
-    // Default directory and hangar binding belong to the profile; the machine stays.
+    // The default directory belongs to the profile.
     if let Err(error) = crate::client::locations::operation_lock()
         .and_then(|_guard| crate::client::locations::remove_binding(&id))
     {
@@ -701,6 +741,23 @@ fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     let Some(id) = one_profile_id(args, &usage)? else {
         return Ok(2);
     };
+    if let Some(remote) = load_remotes()?.hangar_remote(&id) {
+        return match crate::client::locations::set_hidden(&remote.binding, !enabled) {
+            Ok(()) => {
+                println!(
+                    "{} hangar machine {} {} the sidebar.",
+                    if enabled { "Showing" } else { "Hid" },
+                    remote.profile.label,
+                    if enabled { "in" } else { "from" }
+                );
+                Ok(0)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                Ok(1)
+            }
+        };
+    }
     let mut catalog = load_catalog()?;
     let previous_selection = catalog.selected_profile.clone();
     if !catalog.set_enabled(&id, enabled) {
@@ -730,6 +787,10 @@ fn one_profile_id(args: &[String], usage: &str) -> std::io::Result<Option<Profil
             Ok(None)
         }
     }
+}
+
+fn load_remotes() -> std::io::Result<crate::client::locations::Remotes> {
+    crate::client::locations::Remotes::load().map_err(std::io::Error::other)
 }
 
 fn load_catalog() -> std::io::Result<EndpointCatalog> {
@@ -852,25 +913,61 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_hangar_machine_requires_the_delete_flag() {
-        use crate::client::locations::CloudBinding;
-        use crate::hangar::binding::HangarBinding;
-        let cloud = CloudBinding::Hangar(
-            HangarBinding::new("https://hangar.test", "m_agqp6jaaa6kqkitog6zzqzdfhy", "box")
-                .unwrap(),
-        );
-        let refused = check_remove(Some(&cloud), &["box"], false).unwrap_err();
+    fn removing_a_hangar_machine_requires_the_delete_flag_and_explains_hiding() {
+        let refused = check_remove(Some("box"), false).unwrap_err();
         assert!(refused.contains("--delete-machine"), "{refused}");
         assert!(refused.contains("'box'"), "{refused}");
         assert!(refused.contains("permanently deleted"), "{refused}");
-        assert!(check_remove(Some(&cloud), &["box"], true).is_ok());
-        assert!(check_remove(None, &[], false).is_ok());
-        assert!(check_remove(None, &[], true)
+        assert!(refused.contains("herdr machine disable"), "{refused}");
+        assert!(refused.contains("Hide from sidebar"), "{refused}");
+        assert!(check_remove(Some("box"), true).is_ok());
+        assert!(check_remove(None, false).is_ok());
+        assert!(check_remove(None, true)
             .unwrap_err()
             .contains("only to hangar"));
         let (rest, flag) = parse_remove_args(&["--delete-machine".into(), "abc".into()]);
         assert!(flag);
         assert_eq!(rest, ["abc"]);
+    }
+
+    #[test]
+    fn list_marks_hangar_machines_with_source_state_and_sync_status() {
+        use crate::client::locations::sync::{CachedMachine, MachineCache, SyncStatus};
+        use crate::client::locations::{LocationPreferences, Remotes};
+        let ssh =
+            crate::client::endpoint::SavedSshEndpoint::new("plain", "workbox", "default").unwrap();
+        let mut cache = MachineCache::default();
+        let entry = cache
+            .servers
+            .entry("https://hangar.test".into())
+            .or_default();
+        entry.status = SyncStatus::Unreachable;
+        entry.machines.push(CachedMachine {
+            id: "m_agqp6jaaa6kqkitog6zzqzdfhy".into(),
+            name: "box".into(),
+            state: crate::hangar::api::MachineState::Stopped,
+            fence_until_ms: 0,
+        });
+        let mut prefs = LocationPreferences::default();
+        prefs
+            .edit_machine(
+                "https://hangar.test",
+                "m_agqp6jaaa6kqkitog6zzqzdfhy",
+                |entry| entry.hidden = true,
+            )
+            .unwrap();
+        let remotes = Remotes::build(vec![ssh.clone()], prefs, &cache, 0);
+        let rows = list_rows(&remotes, Some(&ssh.id));
+        let value = serde_json::to_value(&rows).unwrap();
+        assert_eq!(value[0]["source"], "ssh");
+        assert_eq!(value[0]["selected"], true);
+        assert!(value[0].get("state").is_none());
+        assert_eq!(value[1]["source"], "hangar");
+        assert_eq!(value[1]["state"], "stopped");
+        assert_eq!(value[1]["hidden"], true);
+        assert_eq!(value[1]["sync"], "offline");
+        assert_eq!(value[1]["enabled"], false);
+        assert_eq!(value[1]["target"], "hangar-m_agqp6jaaa6kqkitog6zzqzdfhy");
     }
 
     #[test]
@@ -883,12 +980,17 @@ mod tests {
     #[test]
     fn list_rows_do_not_have_credential_fields() {
         let encoded = serde_json::to_string(&MachineListRow {
-            id: "0123456789abcdef0123456789abcdef",
-            label: "Build",
-            target: "dev@build",
-            session: "agents",
+            id: "0123456789abcdef0123456789abcdef".into(),
+            label: "Build".into(),
+            target: "dev@build".into(),
+            session: "agents".into(),
             enabled: true,
             selected: false,
+            source: "ssh",
+            server: None,
+            state: None,
+            hidden: false,
+            sync: None,
         })
         .unwrap();
         assert!(!encoded.contains("password"));

@@ -8,7 +8,8 @@ pub(super) fn watch_profiles(
     std::thread::spawn(move || {
         let mut previous = None;
         while !should_quit.load(Ordering::Acquire) {
-            let current = endpoint::EndpointCatalog::load_profiles();
+            // Saved SSH profiles plus visible hangar machines from the synced list.
+            let current = crate::client::locations::effective_profiles();
             if previous.as_ref() != Some(&current) {
                 previous = Some(current.clone());
                 if event_tx
@@ -53,6 +54,17 @@ pub(super) fn apply_profiles(
                 shell.cancel_endpoint_request(&request_id);
             }
             shell.retire_endpoint(&endpoint_id);
+            // A hangar machine deleted elsewhere: say so instead of leaving a silent gap.
+            // It is gone from the list, so nothing reconnects to it.
+            if let endpoint::ClientEndpointId::Ssh(profile_id) = &endpoint_id {
+                if !profiles.iter().any(|profile| &profile.id == profile_id) {
+                    if let Some(name) =
+                        crate::client::locations::sync::removed_machine_name(profile_id)
+                    {
+                        shell.notify_endpoint(format!("{name}: machine deleted on server"));
+                    }
+                }
+            }
         }
     }
     catalog.ssh = profiles;
@@ -237,5 +249,98 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_machine_deleted_on_the_server_disconnects_with_a_notice_and_no_reconnect() {
+        use crate::client::locations::sync::{derived_profile_id, sync_with, MachineCache};
+        let _guard = crate::config::test_config_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let old = std::env::var_os("XDG_STATE_HOME");
+        let base =
+            std::env::temp_dir().join(format!("herdr-deleted-machine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("XDG_STATE_HOME", &base);
+        let result = std::panic::catch_unwind(|| {
+            const SERVER: &str = "https://hangar.test";
+            const ID: &str = "m_agqp6jaaa6kqkitog6zzqzdfhy";
+            let machine = |state: &str| {
+                serde_json::from_value::<crate::hangar::api::Machine>(serde_json::json!({
+                    "id": ID, "name": "box", "state": state
+                }))
+                .unwrap()
+            };
+            sync_with(&[SERVER.to_owned()], &|_| Ok(vec![machine("running")]));
+            let profiles = crate::client::locations::effective_profiles().unwrap();
+            assert_eq!(profiles.len(), 1);
+            let remote = ClientEndpointId::Ssh(profiles[0].id.clone());
+            assert_eq!(profiles[0].id, derived_profile_id(SERVER, ID));
+            let now = Instant::now();
+            let mut state = state();
+            let mut catalog = EndpointCatalog::default();
+            catalog.ssh = profiles.clone();
+            state
+                .shell
+                .as_mut()
+                .unwrap()
+                .set_endpoint_catalog(&catalog.ssh);
+            let mut supervisors = EndpointSupervisors::new(&catalog.ssh, now);
+            let mut endpoints = EndpointRegistry::empty();
+            let disconnects = Arc::new(AtomicUsize::new(0));
+            endpoints.insert(
+                remote.clone(),
+                Transport(disconnects.clone()),
+                2,
+                Default::default(),
+                true,
+            );
+            let mut commands = endpoint_commands::EndpointCommands::default();
+            // A failed fetch never removes it.
+            sync_with(&[SERVER.to_owned()], &|_| {
+                Err(crate::hangar::api::HangarError::NotSignedIn)
+            });
+            let unchanged = crate::client::locations::effective_profiles().unwrap();
+            assert_eq!(unchanged, profiles);
+            // A stopped machine stays listed but stops connecting.
+            sync_with(&[SERVER.to_owned()], &|_| Ok(vec![machine("stopped")]));
+            let stopped = crate::client::locations::effective_profiles().unwrap();
+            assert_eq!(stopped.len(), 1);
+            assert!(!stopped[0].enabled);
+            // Deleted on the server: gone from the list, so its endpoint is retired.
+            sync_with(&[SERVER.to_owned()], &|_| Ok(Vec::new()));
+            let after = crate::client::locations::effective_profiles().unwrap();
+            assert!(after.is_empty());
+            apply_profiles(
+                &mut state,
+                &mut endpoints,
+                &mut commands,
+                &mut supervisors,
+                &mut catalog,
+                after,
+                now,
+            );
+            assert!(endpoints.connection(&remote).is_none());
+            assert_eq!(disconnects.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                state.shell.as_ref().unwrap().endpoint_notice(),
+                Some("box: machine deleted on server")
+            );
+            assert!(!supervisors.record_status(
+                &remote,
+                2,
+                endpoint::ClientEndpointStatus::Online,
+                now
+            ));
+            assert!(MachineCache::load().unwrap().servers[SERVER]
+                .machines
+                .is_empty());
+        });
+        match old {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 }
