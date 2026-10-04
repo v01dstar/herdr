@@ -684,7 +684,21 @@ impl ClientShellState {
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Locations(_))) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                if super::contains(self.hits.overlay_cancel, point) {
+                let busy = matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Locations(ref dialog)) if dialog.busy
+                );
+                let tab = self
+                    .hits
+                    .settings_tabs
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, section)| *section);
+                if let Some(section) = tab {
+                    if !busy {
+                        self.switch_from_remotes_tab(section, outcome);
+                    }
+                } else if super::contains(self.hits.overlay_cancel, point) {
                     self.close_location();
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.accept_location(outcome);

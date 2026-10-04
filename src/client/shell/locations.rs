@@ -914,6 +914,10 @@ impl ClientShellState {
             KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
                 dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
             }
+            // The remotes list is the Settings → Remotes tab: ←/→ move between tabs.
+            KeyCode::Left | KeyCode::Right if matches!(dialog.kind, LocationDialogKind::Manage) => {
+                self.move_from_remotes_tab(if key.code == KeyCode::Left { -1 } else { 1 }, outcome)
+            }
             KeyCode::Enter => self.accept_location(outcome),
             _ => {
                 if let Some(editor) = dialog.editor_mut() {
@@ -1698,5 +1702,29 @@ mod tests {
         ));
         state.compose(120, 40).unwrap();
         assert!(!state.hits.settings_choices.is_empty());
+
+        // The Remotes tab keeps the settings tabs, and they lead back to other sections.
+        let (rect, _) = *state
+            .hits
+            .settings_tabs
+            .iter()
+            .find(|(_, section)| *section == ClientSettingsSection::Theme)
+            .unwrap();
+        state.handle_mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                section: ClientSettingsSection::Theme,
+                ..
+            }))
+        ));
     }
 }

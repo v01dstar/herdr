@@ -70,55 +70,8 @@ pub(in crate::client::shell) fn render_settings_overlay(
             .integrations
             .iter()
             .any(|integration| integration.state == crate::api::schema::IntegrationState::Outdated);
-    let mut tab_x = inner.x;
-    let mut tab_hits = Vec::new();
-    for section in ClientSettingsSection::ALL {
-        let badge = *section == ClientSettingsSection::Integrations && integration_badge;
-        let label = if badge {
-            format!(" ● {} ", section.label())
-        } else {
-            format!(" {} ", section.label())
-        };
-        let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
-        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
-        let active = *section == settings.section;
-        let style = if active {
-            Style::default()
-                .fg(contrast(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
-        };
-        buffer.set_style(rect, style);
-        put_text(buffer, rect.x, rect.y, rect.width, &label, style);
-        if badge && !active {
-            put_text(
-                buffer,
-                rect.x.saturating_add(1),
-                rect.y,
-                rect.width.saturating_sub(1).min(2),
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
-        tab_hits.push((rect, *section));
-        tab_x = tab_x.saturating_add(width.saturating_add(1));
-        if tab_x >= inner.right() {
-            break;
-        }
-    }
-    put_text(
-        buffer,
-        inner.x,
-        inner.y + 2,
-        inner.width,
-        &"─".repeat(inner.width as usize),
-        Style::default().fg(palette.surface0).bg(palette.panel_bg),
-    );
+    let tab_hits =
+        render_settings_tabs(buffer, inner, settings.section, integration_badge, palette);
 
     let content = Rect::new(
         inner.x,
@@ -413,4 +366,65 @@ fn render_integrations(
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
     }
+}
+
+/// Draws the settings tab strip on the second row of `inner` and the rule below it.
+/// Shared with the remotes dialog, which is the Remotes tab.
+pub(in crate::client::shell) fn render_settings_tabs(
+    buffer: &mut Buffer,
+    inner: Rect,
+    active_section: ClientSettingsSection,
+    integration_badge: bool,
+    palette: &Palette,
+) -> Vec<(Rect, ClientSettingsSection)> {
+    let mut tab_x = inner.x;
+    let mut tab_hits = Vec::new();
+    for section in ClientSettingsSection::ALL {
+        let badge = *section == ClientSettingsSection::Integrations && integration_badge;
+        let label = if badge {
+            format!(" ● {} ", section.label())
+        } else {
+            format!(" {} ", section.label())
+        };
+        let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
+        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
+        let active = *section == active_section;
+        let style = if active {
+            Style::default()
+                .fg(contrast(palette))
+                .bg(palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
+        };
+        buffer.set_style(rect, style);
+        put_text(buffer, rect.x, rect.y, rect.width, &label, style);
+        if badge && !active {
+            put_text(
+                buffer,
+                rect.x.saturating_add(1),
+                rect.y,
+                rect.width.saturating_sub(1).min(2),
+                "● ",
+                Style::default()
+                    .fg(palette.accent)
+                    .bg(palette.panel_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        tab_hits.push((rect, *section));
+        tab_x = tab_x.saturating_add(width.saturating_add(1));
+        if tab_x >= inner.right() {
+            break;
+        }
+    }
+    put_text(
+        buffer,
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        &"─".repeat(inner.width as usize),
+        Style::default().fg(palette.surface0).bg(palette.panel_bg),
+    );
+    tab_hits
 }

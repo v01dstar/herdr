@@ -9,7 +9,13 @@ pub(in crate::client::shell) fn render_locations(
     if let LocationDialogKind::Add(form) = &dialog.kind {
         return render_add_remote(buffer, dialog, form, palette);
     }
-    let area = popup(buffer.area, 78, 24)?;
+    // The remotes list is the Settings → Remotes tab, so it keeps the settings frame and tabs.
+    let manage = matches!(dialog.kind, LocationDialogKind::Manage);
+    let area = if manage {
+        popup(buffer.area, 76, 22)?
+    } else {
+        popup(buffer.area, 78, 24)?
+    };
     let inner = panel(buffer, area, palette.accent, palette.panel_bg)?;
     if inner.width < 20 || inner.height < 7 {
         return None;
@@ -21,10 +27,27 @@ pub(in crate::client::shell) fn render_locations(
         inner.x,
         inner.y,
         inner.width,
-        &format!(" {}", dialog.title()),
+        &format!(" {}", if manage { "settings" } else { dialog.title() }),
         normal.add_modifier(Modifier::BOLD),
     );
-    let visible = usize::from(inner.height.saturating_sub(8));
+    let settings_tabs = if manage {
+        super::settings_overlay::render_settings_tabs(
+            buffer,
+            inner,
+            crate::client::shell::state::ClientSettingsSection::Remotes,
+            false,
+            palette,
+        )
+    } else {
+        Vec::new()
+    };
+    let rows_top = if manage { inner.y + 4 } else { inner.y + 2 };
+    let visible = usize::from(
+        inner
+            .height
+            .saturating_sub(8)
+            .saturating_sub(rows_top - inner.y - 2),
+    );
     let scroll = dialog
         .selected
         .min(dialog.labels().len().saturating_sub(1))
@@ -39,7 +62,7 @@ pub(in crate::client::shell) fn render_locations(
         .take(visible)
         .enumerate()
     {
-        let rect = Rect::new(inner.x, inner.y + 2 + position as u16, inner.width, 1);
+        let rect = Rect::new(inner.x, rows_top + position as u16, inner.width, 1);
         let style = if dialog.selected == index && !dialog.busy {
             highlight
         } else {
@@ -143,6 +166,7 @@ pub(in crate::client::shell) fn render_locations(
         primary,
         cancel,
         settings_choices: hits,
+        settings_tabs,
         cursor,
         ..Default::default()
     })

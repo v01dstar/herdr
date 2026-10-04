@@ -87,6 +87,31 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    /// Leaves the remotes dialog (the Remotes tab) for another settings tab.
+    pub(super) fn switch_from_remotes_tab(
+        &mut self,
+        section: ClientSettingsSection,
+        outcome: &mut ClientShellInput,
+    ) {
+        if section == ClientSettingsSection::Remotes {
+            return;
+        }
+        self.close_location();
+        self.open_settings_overlay();
+        self.select_settings_section(section, outcome);
+    }
+
+    /// Moves to the neighbouring settings tab from the remotes dialog.
+    pub(super) fn move_from_remotes_tab(&mut self, delta: isize, outcome: &mut ClientShellInput) {
+        let all = ClientSettingsSection::ALL;
+        let current = all
+            .iter()
+            .position(|section| *section == ClientSettingsSection::Remotes)
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(all.len() as isize) as usize;
+        self.switch_from_remotes_tab(all[next], outcome);
+    }
+
     fn move_settings_section(&mut self, delta: isize, outcome: &mut ClientShellInput) {
         let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_ref() else {
             return;
