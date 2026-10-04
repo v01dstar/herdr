@@ -25,7 +25,9 @@ Herdr 会请求 SSH 压缩，以减少受限连接上的屏幕更新流量。这
 
 ### hangar 机器
 
-选择 **Add remote → Provider: hangar** 可使用 hangar 服务器上的机器。Herdr 与 `hangar` CLI 共享登录信息（`~/.config/hangar/credentials.json`）：如果已运行过 `hangar login`，会直接显示机器列表；否则点击 **Sign in**，弹窗会显示验证码，并在浏览器中打开 GitHub 设备登录页面。默认服务器为 `https://152.236.1.51`；如需添加其他服务器上的机器，请在启动 Herdr 前设置 `HANGAR_SERVER`。每个已保存的机器都会记住自己的服务器。
+选择 **Add remote → Provider: hangar** 可使用 hangar 服务器上的机器。Herdr 与 `hangar` CLI 共享登录信息（`~/.config/hangar/credentials.json`）：如果已运行过 `hangar login`，会直接显示机器列表；否则点击 **Sign in**，在打开的浏览器中完成登录。默认服务器为 `https://152.236.1.51`；如需添加其他服务器上的机器，请在启动 Herdr 前设置 `HANGAR_SERVER`。每个已保存的机器都会记住自己的服务器。
+
+**Settings → remotes → hangar account** 显示当前登录的账号（例如 **hangar account: @octocat**），并提供 **Sign in** 和 **Sign out…**。**Sign in** 会在浏览器中打开 hangar 的登录页面；在 GitHub 上批准后，浏览器会回到 Herdr 等待期间在 `127.0.0.1` 上提供的页面，之后可以关闭该标签页。Herdr 最多等待 5 分钟，按 **Esc** 可取消。通过 SSH 使用时（设置了 `SSH_CONNECTION` 或 `SSH_TTY` 且没有显示环境）、在没有 `DISPLAY` 和 `WAYLAND_DISPLAY` 的 Linux 上、无法打开浏览器时，或服务器不支持浏览器登录时，Herdr 会改为显示一个验证码，需在 GitHub 设备登录页面输入。**Sign out…** 确认后会在服务器上撤销登录，并删除 `~/.config/hangar/credentials.json`，因此 `hangar` CLI 也会一并退出登录。机器会继续运行，但在重新登录之前，hangar Remote 无法启动、停止或重连。
 
 **Machine** 列表显示你的机器，已停止的机器会被标出。选择一台机器并点击 **Connect**，或选择 **Create new machine**，输入名称后点击 **Create and connect**。新机器使用 `herdr` 模板的默认规格和持久磁盘。Herdr 等待机器就绪后启动 `herdr-remote` session，并启用自动连接。已停止的机器会以禁用状态保存，不会被启动。在终端中可使用 `herdr machine add <name-or-id> --hangar` 以同样方式保存已有机器。
 

@@ -37,6 +37,8 @@ pub(crate) enum ErrorCode {
     SlowDown,
     ExpiredToken,
     AccessDenied,
+    /// The loopback sign-in code expired, was reused or did not match.
+    InvalidGrant,
     Unknown(String),
 }
 
@@ -58,6 +60,7 @@ impl ErrorCode {
             "slow_down" => Self::SlowDown,
             "expired_token" => Self::ExpiredToken,
             "access_denied" => Self::AccessDenied,
+            "invalid_grant" => Self::InvalidGrant,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -355,6 +358,16 @@ pub(crate) struct Tokens {
     pub refresh_expires_at: String,
 }
 
+/// The signed-in user (`GET /v1/me`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Me {
+    #[serde(default)]
+    pub user_id: i64,
+    #[serde(default)]
+    pub login: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateMachineRequest<'a> {
@@ -431,7 +444,7 @@ impl HangarError {
 }
 
 pub(crate) const SIGN_IN_HINT: &str =
-    "Sign in to hangar from Settings → remotes → Add remote, or run `hangar login`.";
+    "Sign in to hangar from Settings → remotes → hangar account, or run `hangar login`.";
 
 impl std::fmt::Display for HangarError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -931,6 +944,67 @@ impl Client {
             None,
             false,
         )
+    }
+
+    /// Whether the server offers the browser (loopback) sign-in. Like the hangar CLI,
+    /// a request without parameters gets 400 when it does; 404 (older servers) and 503
+    /// (browser sign-in not configured) mean it does not. `Err` says why not.
+    pub(crate) fn probe_cli_login(&self) -> Result<(), String> {
+        let request = HttpRequest {
+            method: "GET",
+            url: format!("{}/auth/cli/start", self.server),
+            bearer: None,
+            idempotency_key: None,
+            body: None,
+        };
+        match self.http.send(&request) {
+            Ok(response) if response.status == 400 => Ok(()),
+            Ok(response) => Err(format!(
+                "the server does not offer browser sign-in (HTTP {})",
+                response.status
+            )),
+            Err(error) => Err(HangarError::Transport(error).to_string()),
+        }
+    }
+
+    /// The page that starts the loopback sign-in in the user's browser.
+    pub(crate) fn cli_start_url(&self, redirect_uri: &str, state: &str, challenge: &str) -> String {
+        format!(
+            "{}/auth/cli/start?redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+            self.server,
+            query_escape(redirect_uri),
+            query_escape(state),
+            query_escape(challenge)
+        )
+    }
+
+    /// Exchanges a one-time loopback code. Never retried: codes are single use.
+    pub(crate) fn exchange_cli_code(
+        &self,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<Tokens, HangarError> {
+        let body = serde_json::json!({
+            "code": code, "codeVerifier": verifier, "redirectUri": redirect_uri
+        });
+        self.call(
+            "POST",
+            "/v1/auth/cli/token",
+            Some(body.to_string()),
+            None,
+            false,
+        )
+    }
+
+    pub(crate) fn me(&self) -> Result<Me, HangarError> {
+        self.call("GET", "/v1/me", None, None, true)
+    }
+
+    /// Revokes the presented access token and its refresh token.
+    pub(crate) fn logout(&self) -> Result<(), HangarError> {
+        self.request("POST", "/v1/auth/logout", None, None, true)
+            .map(|_| ())
     }
 
     pub(crate) fn refresh(&self, refresh_token: &str) -> Result<Tokens, HangarError> {

@@ -3,7 +3,8 @@
 //! epoch so a late result never overrides a newer dialog or selection.
 use super::*;
 use crate::client::locations::hangar::{self as machines, MachineSource};
-use crate::hangar::api::{DeviceStart, HangarError, Image, Machine, MachineState};
+use crate::hangar::api::{HangarError, Image, Machine, MachineState};
+use crate::hangar::login::SignInStep;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,7 +36,8 @@ pub(in crate::client::shell) struct AddRemoteForm {
     pub(in crate::client::shell) dropdown: Option<(usize, usize)>,
     loading: bool,
     signed_in: bool,
-    sign_in: Option<DeviceStart>,
+    /// The sign-in step in progress (browser or device code).
+    sign_in: Option<SignInStep>,
 }
 
 impl Default for AddRemoteForm {
@@ -267,7 +269,7 @@ enum Discovery {
         bound: Vec<String>,
         images: Vec<Image>,
     },
-    Code(DeviceStart),
+    SignIn(SignInStep),
     SignInFailed(String),
 }
 
@@ -384,33 +386,11 @@ impl ClientShellState {
         let (send, receive) = mpsc::channel();
         self.locations.add.discovery = Some((self.locations.epoch, receive));
         std::thread::spawn(move || {
-            let server = crate::hangar::default_server();
-            let Some(store) = crate::hangar::auth::CredentialStore::shared() else {
-                let _ = send.send(Discovery::SignInFailed(
-                    "Cannot find a home directory for hangar credentials".into(),
-                ));
-                return;
-            };
-            let client = crate::hangar::api::Client::new(
-                &server,
-                Arc::new(crate::hangar::api::CurlHttp),
-                None,
-            );
-            let result = crate::hangar::auth::sign_in(
-                &client,
-                &store,
-                |device| {
-                    let _ = send.send(Discovery::Code(device.clone()));
-                    match crate::platform::open_url(&device.verification_uri) {
-                        Ok(Some(mut child)) => {
-                            std::thread::spawn(move || child.wait());
-                        }
-                        Ok(None) => {}
-                        Err(error) => tracing::debug!(%error, "could not open a browser"),
-                    }
+            let result = machines::sign_in(
+                &mut |step| {
+                    let _ = send.send(Discovery::SignIn(step));
                 },
-                || cancel.load(Ordering::Acquire),
-                &crate::hangar::auth::system_clock(),
+                &|| cancel.load(Ordering::Acquire),
             );
             match result {
                 Ok(()) => list_worker(&send),
@@ -748,7 +728,7 @@ impl ClientShellState {
                 self.locations.add.discovery = None;
                 break;
             };
-            if !matches!(event, Discovery::Code(_)) {
+            if !matches!(event, Discovery::SignIn(_)) {
                 self.locations.add.discovery = None;
                 self.locations.add.sign_in_cancel = None;
             }
@@ -790,12 +770,9 @@ impl ClientShellState {
                         format!("{error} Reopen Add remote to retry.")
                     };
                 }
-                Discovery::Code(device) => {
-                    dialog.message = format!(
-                        "Open {} and enter the code {}. Waiting for approval…",
-                        device.verification_uri, device.user_code
-                    );
-                    form.sign_in = Some(device);
+                Discovery::SignIn(step) => {
+                    dialog.message = step.message();
+                    form.sign_in = Some(step);
                 }
                 Discovery::SignInFailed(error) => {
                     form.loading = false;
@@ -1231,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_listing_offers_sign_in_and_shows_the_device_code() {
+    fn signed_out_listing_offers_sign_in_and_shows_each_sign_in_step() {
         let mut state = shell_with(AddRemoteForm::default());
         let (send, receive) = mpsc::channel();
         state.locations.add.discovery = Some((state.locations.epoch, receive));
@@ -1247,12 +1224,15 @@ mod tests {
         state.locations.add.sign_in_cancel = Some(cancel.clone());
         let (send, receive) = mpsc::channel();
         state.locations.add.discovery = Some((state.locations.epoch, receive));
-        send.send(Discovery::Code(DeviceStart {
-            device_code: "dc".into(),
-            user_code: "ABCD-EFGH".into(),
-            verification_uri: "https://github.com/login/device".into(),
-            interval: 5,
-            expires_in: 900,
+        send.send(Discovery::SignIn(SignInStep::Device {
+            device: crate::hangar::api::DeviceStart {
+                device_code: "dc".into(),
+                user_code: "ABCD-EFGH".into(),
+                verification_uri: "https://github.com/login/device".into(),
+                interval: 5,
+                expires_in: 900,
+            },
+            reason: None,
         }))
         .unwrap();
         state.tick_add_remote(&mut ClientShellInput::default());
@@ -1261,6 +1241,19 @@ mod tests {
         };
         assert!(dialog.message.contains("ABCD-EFGH"));
         // The sign-in channel stays open for the result that follows the code.
+        assert!(state.locations.add.discovery.is_some());
+        send.send(Discovery::SignIn(SignInStep::Browser {
+            url: "https://hangar.test/auth/cli/start?state=s".into(),
+        }))
+        .unwrap();
+        state.tick_add_remote(&mut ClientShellInput::default());
+        let Some(ClientShellOverlay::Locations(dialog)) = &state.overlay else {
+            panic!("dialog");
+        };
+        assert!(dialog.message.starts_with("Continue in your browser"));
+        assert!(dialog
+            .message
+            .contains("https://hangar.test/auth/cli/start"));
         assert!(state.locations.add.discovery.is_some());
         state.close_location();
         assert!(cancel.load(Ordering::Acquire), "closing cancels polling");

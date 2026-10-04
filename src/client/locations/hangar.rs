@@ -2,15 +2,18 @@
 //! run only on worker threads. Accepting a mutation is not readiness: herdr polls the
 //! operation and the machine, and never repeats an accepted mutation. Nothing here
 //! starts a machine implicitly; only explicit Start remote and Create do.
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{operation_lock, CloudBinding, LocationPreferences, RemoteOptions};
 use crate::client::endpoint::{EndpointCatalog, SavedSshEndpoint, MAX_LABEL_BYTES};
 use crate::hangar::api::{
-    Client, CreateImageRequest, CreateMachineRequest, ErrorCode, HangarError, Image, Machine,
-    MachineState, Operation, OperationState, Template, TemplateCapability,
+    Client, CreateImageRequest, CreateMachineRequest, CurlHttp, ErrorCode, HangarError, Image,
+    Machine, MachineState, Operation, OperationState, Template, TemplateCapability,
 };
+use crate::hangar::auth::{system_clock, AccountStatus, CredentialStore, SignOut};
 use crate::hangar::binding::HangarBinding;
+use crate::hangar::login::{browser_unavailable, Browser, SignInStep};
 
 /// The template that ships Herdr; sizes come from its defaults.
 const TEMPLATE: &str = "herdr";
@@ -437,6 +440,92 @@ pub(crate) fn describe(machine: &Machine) -> String {
 
 fn hangar_client(server: &str) -> Result<Client, HangarError> {
     crate::hangar::auth::shared_client(server)
+}
+
+/// Opens `url` in the user's browser. A launcher that fails right away (such as
+/// `xdg-open` without a browser) counts as no browser, so sign-in uses a code instead.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let mut child = match crate::platform::open_url(url) {
+        Ok(Some(child)) => child,
+        Ok(None) => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("the browser launcher exited with {status}")),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                // Still running (some launchers wait for the browser): reap it later.
+                std::thread::spawn(move || child.wait());
+                return Ok(());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+/// Signs in to the server new remotes use (`HANGAR_SERVER`, the signed-in server, or
+/// the default): browser sign-in when possible, else a device code. Stores the
+/// sign-in shared with the hangar CLI.
+pub(crate) fn sign_in(
+    notify: &mut dyn FnMut(SignInStep),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), HangarError> {
+    let server = crate::hangar::default_server();
+    let store = CredentialStore::shared().ok_or_else(|| {
+        HangarError::Invalid("cannot find a home directory for hangar credentials".into())
+    })?;
+    let client = Client::new(&server, Arc::new(CurlHttp), None);
+    let browser = Browser {
+        unavailable: browser_unavailable(
+            |name| std::env::var(name).ok(),
+            crate::platform::OPEN_URL_NEEDS_DISPLAY,
+        ),
+        open: &open_in_browser,
+    };
+    crate::hangar::login::sign_in(
+        &client,
+        &store,
+        &browser,
+        notify,
+        cancelled,
+        &system_clock(),
+    )
+}
+
+/// Who is signed in, checked with hangar.
+pub(crate) fn account_status() -> AccountStatus {
+    let server = crate::hangar::default_server();
+    match CredentialStore::shared() {
+        Some(store) => {
+            crate::hangar::auth::account_status(&store, Arc::new(CurlHttp), system_clock(), &server)
+        }
+        None => AccountStatus::SignedOut { server },
+    }
+}
+
+/// Signs out of hangar (Herdr and the hangar CLI share the sign-in).
+pub(crate) fn sign_out() -> Result<String, String> {
+    let store =
+        CredentialStore::shared().ok_or("Cannot find a home directory for hangar credentials")?;
+    match crate::hangar::auth::sign_out(&store, Arc::new(CurlHttp)) {
+        Ok(SignOut::NotSignedIn) => Ok("Not signed in to hangar.".into()),
+        Ok(SignOut::SignedOut {
+            server,
+            warning: None,
+        }) => Ok(format!(
+            "Signed out of hangar on {server}. The hangar CLI is signed out too."
+        )),
+        Ok(SignOut::SignedOut {
+            server,
+            warning: Some(warning),
+        }) => Ok(format!(
+            "Signed out of hangar on {server} on this computer (the hangar CLI too), but the server did not confirm the revocation: {warning}"
+        )),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub(crate) fn list_machines(server: &str) -> Result<Vec<Machine>, HangarError> {

@@ -78,7 +78,7 @@ pub(in crate::client::shell) fn render_locations(
                 &format!(" {label}: ‹ {} ›", dialog.location_label()),
                 style,
             );
-        } else if matches!(dialog.kind, LocationDialogKind::Manage) {
+        } else if dialog.action_rows() {
             put_text(
                 buffer,
                 rect.x,
@@ -101,9 +101,12 @@ pub(in crate::client::shell) fn render_locations(
         hits.push((rect, index));
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
-    // Confirmations have no rows, so their text gets the whole body; Save as image has
-    // two rows and a long explanation below them.
-    let message_area = if let LocationDialogKind::SaveImage(_) = dialog.kind {
+    // Confirmations have no rows, so their text gets the whole body; Save as image and
+    // the account have few rows and a long explanation below them.
+    let message_area = if matches!(
+        dialog.kind,
+        LocationDialogKind::SaveImage(_) | LocationDialogKind::Account
+    ) {
         let top = inner.y + 2 + dialog.labels().len() as u16 + 1;
         Rect::new(
             inner.x + 1,
@@ -126,7 +129,7 @@ pub(in crate::client::shell) fn render_locations(
             4,
         )
     };
-    Paragraph::new(dialog.message.as_str())
+    Paragraph::new(dialog.body())
         .style(normal)
         .wrap(Wrap { trim: true })
         .render(message_area, buffer);
@@ -135,7 +138,8 @@ pub(in crate::client::shell) fn render_locations(
     } else {
         match dialog.kind {
             LocationDialogKind::Add(_) => " ↵ connect ",
-            LocationDialogKind::Manage => " ↵ select ",
+            LocationDialogKind::Manage | LocationDialogKind::Account => " ↵ select ",
+            LocationDialogKind::SignOut => " ↵ sign out ",
             LocationDialogKind::Edit(_) => " ↵ save ",
             LocationDialogKind::New => " ↵ create ",
             LocationDialogKind::Stop => " ↵ stop ",

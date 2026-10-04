@@ -154,6 +154,16 @@ impl CredentialStore {
             .map_err(|error| io_error(&self.path().display().to_string(), error))
     }
 
+    /// Removes the stored sign-in, as `hangar logout` does. Callers hold `lock()`.
+    pub(crate) fn delete(&self) -> Result<(), HangarError> {
+        match std::fs::remove_file(self.path()) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(io_error("remove hangar credentials", error))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Atomic replace with mode 0600, like the CLI. Callers hold `lock()`.
     pub(crate) fn save(&self, credentials: &Credentials) -> Result<(), HangarError> {
         ensure_private_dir(&self.dir)
@@ -272,6 +282,133 @@ pub(crate) fn shared_client(server: &str) -> Result<Client, HangarError> {
     let http: Arc<dyn HangarHttp> = Arc::new(super::api::CurlHttp);
     let tokens = StoredTokens::new(store, server, http.clone(), system_clock());
     Ok(Client::new(server, http, Some(Arc::new(tokens))))
+}
+
+/// What Settings shows about the shared hangar sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AccountStatus {
+    SignedOut {
+        server: String,
+    },
+    SignedIn {
+        server: String,
+        login: String,
+    },
+    /// Stored credentials that expired or that hangar rejected.
+    Expired {
+        server: String,
+    },
+    /// Stored credentials whose user could not be read (offline, server error).
+    Unverified {
+        server: String,
+        error: String,
+    },
+}
+
+impl AccountStatus {
+    pub(crate) fn signed_in(&self) -> bool {
+        !matches!(self, Self::SignedOut { .. })
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::SignedOut { server } => format!("Not signed in to hangar ({server})."),
+            Self::SignedIn { server, login } => format!("Signed in as @{login} on {server}."),
+            Self::Expired { server } => {
+                format!("The hangar sign-in on {server} expired. Sign in again.")
+            }
+            Self::Unverified { server, error } => {
+                format!("Signed in on {server}, but the account could not be checked: {error}")
+            }
+        }
+    }
+}
+
+/// Reads the shared sign-in and asks hangar who it belongs to (refreshing the access
+/// token when needed). `fallback_server` is shown when nobody is signed in.
+pub(crate) fn account_status(
+    store: &CredentialStore,
+    http: Arc<dyn HangarHttp>,
+    now: Clock,
+    fallback_server: &str,
+) -> AccountStatus {
+    let credentials = match store.load() {
+        Ok(Some(credentials)) if !credentials.access_token.is_empty() => credentials,
+        Ok(_) => {
+            return AccountStatus::SignedOut {
+                server: fallback_server.to_owned(),
+            }
+        }
+        Err(error) => {
+            return AccountStatus::Unverified {
+                server: fallback_server.to_owned(),
+                error: error.to_string(),
+            }
+        }
+    };
+    let server = super::normalize_server(&credentials.server);
+    let tokens = StoredTokens::new(store.clone(), &server, http.clone(), now);
+    match Client::new(&server, http, Some(Arc::new(tokens))).me() {
+        Ok(me) => AccountStatus::SignedIn {
+            server,
+            login: me.login,
+        },
+        Err(error) if error.needs_sign_in() => AccountStatus::Expired { server },
+        Err(error) => AccountStatus::Unverified {
+            server,
+            error: error.to_string(),
+        },
+    }
+}
+
+/// The stored access token as is; logout never refreshes it first.
+struct FixedToken(String);
+
+impl TokenSource for FixedToken {
+    fn token(&self) -> Result<String, HangarError> {
+        Ok(self.0.clone())
+    }
+
+    fn refresh_rejected(&self, _rejected: &str) -> Result<String, HangarError> {
+        Err(HangarError::SessionExpired)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SignOut {
+    NotSignedIn,
+    /// `warning` says why the server-side revocation failed; the local sign-in is
+    /// removed regardless.
+    SignedOut {
+        server: String,
+        warning: Option<String>,
+    },
+}
+
+/// Like `hangar logout`: revokes the tokens on the server, then removes the shared
+/// credentials, which signs out the hangar CLI too. A rejected token is already
+/// unusable and is not reported.
+pub(crate) fn sign_out(
+    store: &CredentialStore,
+    http: Arc<dyn HangarHttp>,
+) -> Result<SignOut, HangarError> {
+    let _lock = store.lock()?;
+    let Some(credentials) = store.load()? else {
+        return Ok(SignOut::NotSignedIn);
+    };
+    let server = super::normalize_server(&credentials.server);
+    let warning = if credentials.access_token.is_empty() {
+        None
+    } else {
+        let token = Arc::new(FixedToken(credentials.access_token.clone()));
+        match Client::new(&server, http, Some(token)).logout() {
+            Ok(()) => None,
+            Err(error) if error.needs_sign_in() => None,
+            Err(error) => Some(error.to_string()),
+        }
+    };
+    store.delete()?;
+    Ok(SignOut::SignedOut { server, warning })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -540,6 +677,103 @@ pub(crate) mod tests {
             system_clock(),
         );
         assert!(matches!(empty.token(), Err(HangarError::NotSignedIn)));
+    }
+
+    #[test]
+    fn account_status_names_the_user_or_says_why_not() {
+        let fallback = "https://default.test";
+        let empty = CredentialStore::at(temp_dir("account-empty"));
+        let http = FakeHttp::new();
+        assert_eq!(
+            account_status(&empty, http.clone(), system_clock(), fallback),
+            AccountStatus::SignedOut {
+                server: fallback.into()
+            }
+        );
+        assert!(http.sent().is_empty(), "no sign-in, no request");
+        let store = signed_in_store("account", "https://hangar.test/");
+        let clock = fixed("2026-10-02T11:00:00Z");
+        http.reply(
+            200,
+            serde_json::json!({"userId": 7, "login": "octo", "admin": false}),
+        );
+        let status = account_status(&store, http.clone(), clock.clone(), fallback);
+        assert_eq!(
+            status,
+            AccountStatus::SignedIn {
+                server: "https://hangar.test".into(),
+                login: "octo".into()
+            }
+        );
+        assert_eq!(
+            status.summary(),
+            "Signed in as @octo on https://hangar.test."
+        );
+        assert_eq!(http.paths(), ["GET /v1/me"]);
+        assert_eq!(http.sent()[0].bearer.as_deref(), Some("a1"));
+        http.error(401, "unauthenticated")
+            .error(401, "unauthenticated");
+        assert_eq!(
+            account_status(&store, http.clone(), clock.clone(), fallback),
+            AccountStatus::Expired {
+                server: "https://hangar.test".into()
+            }
+        );
+        http.push(Err(super::super::api::TransportError::Failed(
+            "offline".into(),
+        )));
+        assert!(matches!(
+            account_status(&store, http, clock, fallback),
+            AccountStatus::Unverified { .. }
+        ));
+    }
+
+    #[test]
+    fn sign_out_revokes_then_removes_the_shared_credentials() {
+        let store = signed_in_store("logout", "https://hangar.test");
+        let http = FakeHttp::new();
+        http.push(Ok(super::super::api::HttpResponse {
+            status: 204,
+            body: Vec::new(),
+        }));
+        assert_eq!(
+            sign_out(&store, http.clone()).unwrap(),
+            SignOut::SignedOut {
+                server: "https://hangar.test".into(),
+                warning: None
+            }
+        );
+        assert_eq!(http.paths(), ["POST /v1/auth/logout"]);
+        let sent = http.sent();
+        assert_eq!(sent[0].bearer.as_deref(), Some("a1"));
+        assert!(sent[0].idempotency_key.is_none());
+        assert!(store.load().unwrap().is_none());
+        assert!(store.lock_path().exists(), "the CLI's lock file stays");
+        assert_eq!(
+            sign_out(&store, http.clone()).unwrap(),
+            SignOut::NotSignedIn
+        );
+        // A rejected token is already unusable; other failures are reported but the
+        // local sign-in is still removed.
+        let store = signed_in_store("logout-401", "https://hangar.test");
+        let http = FakeHttp::new();
+        http.error(401, "unauthenticated");
+        assert!(matches!(
+            sign_out(&store, http.clone()).unwrap(),
+            SignOut::SignedOut { warning: None, .. }
+        ));
+        assert_eq!(http.sent().len(), 1, "logout never refreshes first");
+        let store = signed_in_store("logout-500", "https://hangar.test");
+        let http = FakeHttp::new();
+        http.error(500, "internal");
+        assert!(matches!(
+            sign_out(&store, http).unwrap(),
+            SignOut::SignedOut {
+                warning: Some(_),
+                ..
+            }
+        ));
+        assert!(store.load().unwrap().is_none());
     }
 
     #[test]

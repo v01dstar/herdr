@@ -716,10 +716,7 @@ impl ClientShellState {
                             if dialog.choice_field(index) {
                                 dialog.cycle_location(1);
                             } else {
-                                accept = matches!(
-                                    dialog.kind,
-                                    super::locations::LocationDialogKind::Manage
-                                );
+                                accept = dialog.action_rows();
                             }
                         }
                     }

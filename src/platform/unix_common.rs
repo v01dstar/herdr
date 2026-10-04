@@ -711,3 +711,9 @@ mod shared_ssh_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// Fills `buffer` from the kernel CSPRNG.
+pub(crate) fn fill_random(buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read as _;
+    std::fs::File::open("/dev/urandom")?.read_exact(buffer)
+}

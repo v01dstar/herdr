@@ -332,8 +332,13 @@ mod unix_common;
 pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, RemoteBridgeWake,
+    begin_cli_output, end_cli_output, fill_random, forward_remote_bridge_stdio, RemoteBridgeWake,
 };
+
+/// Whether opening a URL needs a graphical display session (X11 or Wayland). macOS and
+/// Windows always have one for an interactive user.
+pub(crate) const OPEN_URL_NEEDS_DISPLAY: bool =
+    cfg!(not(any(target_os = "macos", target_os = "windows")));
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};

@@ -2599,6 +2599,31 @@ fn read_clipboard_unicode_text() -> Option<String> {
     None
 }
 
+/// Fills `buffer` from the system-preferred CSPRNG.
+pub(crate) fn fill_random(buffer: &mut [u8]) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    for chunk in buffer.chunks_mut(u32::MAX as usize) {
+        // SAFETY: the pointer and length describe a live, writable slice, and the
+        // system-preferred RNG needs no algorithm handle.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err(std::io::Error::other(format!(
+                "BCryptGenRandom failed: NTSTATUS {status:#x}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     let operation = wide_null("open");
     let url = wide_null(url);

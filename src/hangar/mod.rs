@@ -10,6 +10,7 @@ pub(crate) mod api;
 pub(crate) mod auth;
 pub(crate) mod binding;
 pub(crate) mod certs;
+pub(crate) mod login;
 
 /// Used when neither `HANGAR_SERVER` nor stored credentials name a server.
 pub(crate) const DEFAULT_SERVER: &str = "https://152.236.1.51";

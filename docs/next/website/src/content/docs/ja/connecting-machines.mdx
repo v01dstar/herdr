@@ -25,7 +25,9 @@ Local または Remote を選び、**Use as default** で新規作成先を設�
 
 ### hangar マシン
 
-**Add remote → Provider: hangar** を選ぶと、hangar サーバー上のマシンを使えます。サインインは `hangar` CLI と共有します（`~/.config/hangar/credentials.json`）。`hangar login` 済みならすぐにマシン一覧が表示されます。未サインインの場合は **Sign in** を押すと、ダイアログにコードが表示され、ブラウザーで GitHub のデバイス認証ページが開きます。サーバーの既定値は `https://152.236.1.51` です。別のサーバーのマシンを追加するには、Herdr 起動前に `HANGAR_SERVER` を設定してください。保存したマシンはそれぞれのサーバーを記憶します。
+**Add remote → Provider: hangar** を選ぶと、hangar サーバー上のマシンを使えます。サインインは `hangar` CLI と共有します（`~/.config/hangar/credentials.json`）。`hangar login` 済みならすぐにマシン一覧が表示されます。未サインインの場合は **Sign in** を押し、開いたブラウザーでサインインを完了してください。サーバーの既定値は `https://152.236.1.51` です。別のサーバーのマシンを追加するには、Herdr 起動前に `HANGAR_SERVER` を設定してください。保存したマシンはそれぞれのサーバーを記憶します。
+
+**Settings → remotes → hangar account** には、サインイン中のアカウント（例: **hangar account: @octocat**）と **Sign in**、**Sign out…** が表示されます。**Sign in** はブラウザーで hangar のサインインページを開きます。GitHub で承認すると、ブラウザーは Herdr が待機中に `127.0.0.1` で提供するページに戻るので、タブを閉じてかまいません。Herdr は最大 5 分待ち、**Esc** でキャンセルできます。SSH 経由（ディスプレイなしで `SSH_CONNECTION` または `SSH_TTY` が設定されている場合）、`DISPLAY` も `WAYLAND_DISPLAY` もない Linux、ブラウザーを開けない場合、またはサーバーがブラウザーサインインに対応していない場合は、代わりに GitHub のデバイス認証ページで入力するコードを表示します。**Sign out…** は確認後、サーバー側でサインインを取り消し、`~/.config/hangar/credentials.json` を削除します。そのため `hangar` CLI もサインアウトされます。マシンは動き続けますが、再びサインインするまで hangar の Remote の起動・停止・再接続はできません。
 
 **Machine** にはマシン一覧が表示され、停止中のマシンには印が付きます。マシンを選んで **Connect** を押すか、**Create new machine** を選んで名前を入力し **Create and connect** を押します。新しいマシンは `herdr` テンプレートの既定サイズと永続ディスクで作成されます。Herdr はマシンの準備完了を待ってから `herdr-remote` session を起動し、自動接続を有効にします。停止中のマシンは無効状態で保存され、起動はしません。ターミナルからは `herdr machine add <name-or-id> --hangar` で既存マシンを同様に保存できます。
 
