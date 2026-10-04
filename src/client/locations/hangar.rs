@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use super::{operation_lock, CloudBinding, LocationPreferences, RemoteOptions};
 use crate::client::endpoint::{EndpointCatalog, SavedSshEndpoint, MAX_LABEL_BYTES};
 use crate::hangar::api::{
-    Client, CreateImageRequest, CreateMachineRequest, CurlHttp, ErrorCode, HangarError, Image,
-    Machine, MachineState, Operation, OperationState, Template, TemplateCapability,
+    Client, CreateImageRequest, CreateMachineRequest, CurlHttp, ErrorCode, ForkMachineRequest,
+    HangarError, Image, Machine, MachineState, Operation, OperationState, Template,
+    TemplateCapability,
 };
 use crate::hangar::auth::{system_clock, AccountStatus, CredentialStore, SignOut};
 use crate::hangar::binding::HangarBinding;
@@ -272,8 +273,68 @@ pub(crate) struct SaveCheck {
     pub note: String,
 }
 
-/// `templates` is `None` when the catalog could not be read; the server then decides.
-pub(crate) fn save_check(machine: &Machine, templates: Option<&[Template]>) -> SaveCheck {
+/// What a stopped machine's snapshot is used for: Save as image… or Fork machine….
+/// Both need the same stopped, uploaded machine and identity-reset template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotUse {
+    Image,
+    Fork,
+}
+
+impl SnapshotUse {
+    /// "Only a stopped machine can be {passive}."
+    fn passive(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "saved",
+            SnapshotUse::Fork => "forked",
+        }
+    }
+
+    /// The primary button for a machine that must be stopped first.
+    fn stop_action(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "Stop machine and save",
+            SnapshotUse::Fork => "Stop machine and fork",
+        }
+    }
+
+    /// What happens once the machine is stopped.
+    fn then(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "saves the image",
+            SnapshotUse::Fork => "forks it",
+        }
+    }
+
+    fn too_old(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "save images from",
+            SnapshotUse::Fork => "fork",
+        }
+    }
+
+    fn redo(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "save that one",
+            SnapshotUse::Fork => "fork that one",
+        }
+    }
+
+    fn dialog(self) -> &'static str {
+        match self {
+            SnapshotUse::Image => "Save as image…",
+            SnapshotUse::Fork => "Fork machine…",
+        }
+    }
+}
+
+/// Whether the machine can be used for `usage`. `templates` is `None` when the catalog
+/// could not be read; the server then decides.
+pub(crate) fn snapshot_check(
+    machine: &Machine,
+    templates: Option<&[Template]>,
+    usage: SnapshotUse,
+) -> SaveCheck {
     let name = &machine.name;
     if let (Some(templates), Some(template)) = (templates, machine.template.as_ref()) {
         let supported = templates.iter().any(|candidate| {
@@ -285,8 +346,10 @@ pub(crate) fn save_check(machine: &Machine, templates: Option<&[Template]>) -> S
             return SaveCheck {
                 plan: None,
                 note: format!(
-                    "{name} was created from template {}, which is too old to save images from. Create a new machine from the latest template (Add remote → Create new machine), set it up there, and save that one.",
-                    template.label()
+                    "{name} was created from template {}, which is too old to {}. Create a new machine from the latest template (Add remote → Create new machine), set it up there, and {}.",
+                    template.label(),
+                    usage.too_old(),
+                    usage.redo(),
                 ),
             };
         }
@@ -295,45 +358,57 @@ pub(crate) fn save_check(machine: &Machine, templates: Option<&[Template]>) -> S
         .storage
         .as_ref()
         .is_none_or(|storage| storage.synced);
+    let (passive, action, then) = (usage.passive(), usage.stop_action(), usage.then());
     let (plan, note) = match machine.state {
         MachineState::Stopped if synced => (Some(SavePlan::Save), String::new()),
         MachineState::Stopped => (
             Some(SavePlan::Stop),
-            format!("{name} has changes that are not uploaded yet. Stop machine and save stops it again to upload them, then saves the image."),
+            format!("{name} has changes that are not uploaded yet. {action} stops it again to upload them, then {then}."),
         ),
         MachineState::Running | MachineState::Error => (
             Some(SavePlan::Stop),
-            format!("{name} is {}. Only a stopped machine can be saved. Stop machine and save stops all sessions and jobs on it (as Stop machine… does), waits until it is stopped, then saves the image.", machine.state.as_str()),
+            format!("{name} is {}. Only a stopped machine can be {passive}. {action} stops all sessions and jobs on it (as Stop machine… does), waits until it is stopped, then {then}.", machine.state.as_str()),
         ),
         MachineState::Suspended => (
             Some(SavePlan::ResumeThenStop),
-            format!("{name} is suspended. Only a stopped machine can be saved, and a suspended machine keeps its memory. Stop machine and save resumes it, stops all sessions and jobs on it, waits until it is stopped, then saves the image."),
+            format!("{name} is suspended. Only a stopped machine can be {passive}, and a suspended machine keeps its memory. {action} resumes it, stops all sessions and jobs on it, waits until it is stopped, then {then}."),
         ),
         state => (
             None,
-            format!("{name} is {}. Wait until it is stopped or running, then open Save as image… again.", state.as_str()),
+            format!("{name} is {}. Wait until it is stopped or running, then open {} again.", state.as_str(), usage.dialog()),
         ),
     };
     SaveCheck { plan, note }
 }
 
 pub(crate) fn check_save_with(client: &Client, machine_id: &str) -> Result<SaveCheck, HangarError> {
+    check_snapshot_with(client, machine_id, SnapshotUse::Image)
+}
+
+pub(crate) fn check_snapshot_with(
+    client: &Client,
+    machine_id: &str,
+    usage: SnapshotUse,
+) -> Result<SaveCheck, HangarError> {
     let machine = client.machine(machine_id)?;
     let templates = client
         .templates()
         .map_err(|error| tracing::debug!(%error, "could not read hangar templates"))
         .ok();
-    Ok(save_check(&machine, templates.as_deref()))
+    Ok(snapshot_check(&machine, templates.as_deref(), usage))
+}
+
+fn valid_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !name.starts_with('-')
 }
 
 /// Image names follow hangar's rule; checked before any machine is stopped.
 pub(crate) fn validate_image_name(name: &str) -> Result<(), String> {
-    let valid = (1..=63).contains(&name.len())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !name.starts_with('-');
-    if valid {
+    if valid_name(name) {
         Ok(())
     } else {
         Err("Image names use 1–63 lowercase letters, digits or '-', starting with a letter or digit.".into())
@@ -358,6 +433,26 @@ pub(crate) fn image_error(error: &HangarError) -> String {
     }
 }
 
+/// Brings the machine to a stopped, uploaded state per `plan`. `quiesce` runs right
+/// before the stop: it disables automatic connection and stops the Herdr sessions, as
+/// Stop machine does.
+fn prepare_source(
+    client: &Client,
+    machine_id: &str,
+    plan: SavePlan,
+    quiesce: &mut dyn FnMut() -> Result<(), String>,
+    progress: Progress<'_>,
+) -> Result<(), HangarError> {
+    if plan == SavePlan::ResumeThenStop {
+        start_with(client, machine_id, progress)?;
+    }
+    if plan != SavePlan::Save {
+        quiesce().map_err(HangarError::Invalid)?;
+        stop_with(client, machine_id, progress)?;
+    }
+    Ok(())
+}
+
 /// Brings the machine to a stopped, uploaded state per `plan`, then saves the image.
 /// `quiesce` runs right before the stop: it disables automatic connection and stops
 /// the Herdr sessions, as Stop machine does.
@@ -369,13 +464,7 @@ pub(crate) fn save_image_with(
     quiesce: &mut dyn FnMut() -> Result<(), String>,
     progress: Progress<'_>,
 ) -> Result<Image, HangarError> {
-    if plan == SavePlan::ResumeThenStop {
-        start_with(client, machine_id, progress)?;
-    }
-    if plan != SavePlan::Save {
-        quiesce().map_err(HangarError::Invalid)?;
-        stop_with(client, machine_id, progress)?;
-    }
+    prepare_source(client, machine_id, plan, quiesce, progress)?;
     progress(format!("Saving image {}…", request.name));
     match client.create_image(&crate::hangar::new_idempotency_key(), machine_id, request) {
         Err(HangarError::Api(error)) if error.code == ErrorCode::OperationConflict => {
@@ -400,6 +489,73 @@ pub(crate) fn delete_image_with(client: &Client, id: &str) -> Result<Deletion, H
         Err(error) if error.code() == Some(&ErrorCode::NotFound) => Ok(Deletion::AlreadyGone),
         Err(error) => Err(error),
     }
+}
+
+/// What Fork machine… copies, shown before forking.
+pub(crate) const FORK_CONTENTS: &str = "The fork is a new machine with a copy of this machine's root disk and its /data disk: repositories, your home directory, and signed-in credentials (gh, Claude, Codex, SSH keys). It gets its own SSH host keys, machine ID and hostname, starts, and is added as a remote. This machine is left stopped. Forks count toward your machine limit.";
+
+/// The suggested fork name: `<source>-fork`, shortened to hangar's 63 bytes.
+pub(crate) fn default_fork_name(source: &str) -> String {
+    const SUFFIX: &str = "-fork";
+    let mut base = source.to_owned();
+    while base.len() + SUFFIX.len() > 63 {
+        base.pop();
+    }
+    format!("{}{SUFFIX}", base.trim_end_matches('-'))
+}
+
+/// Fork names follow hangar's machine name rule; checked before anything is stopped.
+pub(crate) fn validate_fork_name(name: &str) -> Result<(), String> {
+    if valid_name(name) {
+        Ok(())
+    } else {
+        Err("Machine names use 1–63 lowercase letters, digits or '-', starting with a letter or digit.".into())
+    }
+}
+
+/// Text for a failed fork: hangar's own explanation for refusals and quota limits.
+pub(crate) fn fork_error(error: &HangarError) -> String {
+    match error {
+        HangarError::Api(api)
+            if matches!(
+                api.code,
+                ErrorCode::OperationConflict | ErrorCode::BadRequest | ErrorCode::QuotaExceeded
+            ) && !api.message.is_empty() =>
+        {
+            api.message.clone()
+        }
+        HangarError::Api(api) if api.code == ErrorCode::NotFound => {
+            "the hangar machine no longer exists".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Brings the source to a stopped, uploaded state per `plan` (see [`save_image_with`]),
+/// forks it, and waits until the fork is running and ready. The source stays stopped.
+pub(crate) fn fork_with(
+    client: &Client,
+    source_id: &str,
+    plan: SavePlan,
+    name: &str,
+    quiesce: &mut dyn FnMut() -> Result<(), String>,
+    progress: Progress<'_>,
+) -> Result<Machine, HangarError> {
+    prepare_source(client, source_id, plan, quiesce, progress)?;
+    progress(format!("Forking into {name}…"));
+    let request = ForkMachineRequest {
+        name,
+        desired_state: "running",
+    };
+    let operation = mutate(
+        client,
+        |key| client.fork_machine(key, source_id, &request),
+        progress,
+    )?;
+    if operation.machine_id.is_empty() {
+        return Err(HangarError::Invalid("fork returned no machine".into()));
+    }
+    wait_ready(client, &operation.machine_id, progress)
 }
 
 /// Newest first, as the source picker shows them.
@@ -624,6 +780,31 @@ pub(crate) fn save_image(
         &binding.machine_id,
         plan,
         request,
+        quiesce,
+        progress,
+    )
+}
+
+pub(crate) fn check_fork(binding: &HangarBinding) -> Result<SaveCheck, HangarError> {
+    check_snapshot_with(
+        &hangar_client(&binding.server)?,
+        &binding.machine_id,
+        SnapshotUse::Fork,
+    )
+}
+
+pub(crate) fn fork_machine(
+    binding: &HangarBinding,
+    plan: SavePlan,
+    name: &str,
+    quiesce: &mut dyn FnMut() -> Result<(), String>,
+    progress: Progress<'_>,
+) -> Result<Machine, HangarError> {
+    fork_with(
+        &hangar_client(&binding.server)?,
+        &binding.machine_id,
+        plan,
+        name,
         quiesce,
         progress,
     )
@@ -1026,7 +1207,10 @@ mod tests {
         let machine: Machine =
             serde_json::from_value(with_template(machine(ID, "stopped", false), "x", true))
                 .unwrap();
-        assert_eq!(save_check(&machine, None).plan, Some(SavePlan::Save));
+        assert_eq!(
+            snapshot_check(&machine, None, SnapshotUse::Image).plan,
+            Some(SavePlan::Save)
+        );
     }
 
     #[test]
@@ -1166,6 +1350,219 @@ mod tests {
         let mut images = vec![older, newer];
         sort_images(&mut images);
         assert_eq!(images[0].name, "new");
+    }
+
+    fn fork_check(state: &str, version: &str, synced: bool) -> SaveCheck {
+        let http = FakeHttp::new();
+        http.reply(
+            200,
+            with_template(machine(ID, state, false), version, synced),
+        )
+        .reply(200, templates());
+        check_snapshot_with(&client(&http), ID, SnapshotUse::Fork).unwrap()
+    }
+
+    #[test]
+    fn fork_checks_plan_like_images_with_fork_wording() {
+        assert_eq!(fork_check("stopped", NEW, true).plan, Some(SavePlan::Save));
+        let running = fork_check("running", NEW, true);
+        assert_eq!(running.plan, Some(SavePlan::Stop));
+        assert!(running.note.contains(
+            "Only a stopped machine can be forked. Stop machine and fork stops all sessions"
+        ));
+        assert!(running.note.ends_with("then forks it."));
+        let errored = fork_check("error", NEW, true);
+        assert_eq!(errored.plan, Some(SavePlan::Stop));
+        let unsynced = fork_check("stopped", NEW, false);
+        assert_eq!(unsynced.plan, Some(SavePlan::Stop));
+        assert!(unsynced
+            .note
+            .contains("Stop machine and fork stops it again"));
+        let suspended = fork_check("suspended", NEW, true);
+        assert_eq!(suspended.plan, Some(SavePlan::ResumeThenStop));
+        assert!(suspended.note.contains("resumes it"));
+        let old = fork_check("stopped", "2026-10-02.1", true);
+        assert_eq!(old.plan, None);
+        assert!(old.note.contains("which is too old to fork."));
+        assert!(old.note.contains("fork that one"));
+        let busy = fork_check("starting", NEW, true);
+        assert_eq!(busy.plan, None);
+        assert!(busy.note.contains("then open Fork machine… again"));
+    }
+
+    #[test]
+    fn a_stopped_machine_is_forked_with_a_key_and_the_fork_is_waited_ready() {
+        const FORK: &str = "m_forkforkforkforkforkforkfo";
+        let http = FakeHttp::new();
+        let mut accepted = operation("op_1", "create", "queued");
+        accepted["machineId"] = FORK.into();
+        let mut done = operation("op_1", "create", "succeeded");
+        done["machineId"] = FORK.into();
+        http.reply(202, accepted)
+            .reply(200, done)
+            .reply(200, machine(FORK, "starting", false))
+            .reply(200, machine(FORK, "running", true));
+        let mut quiesced = false;
+        let fork = fork_with(
+            &client(&http),
+            ID,
+            SavePlan::Save,
+            "box-fork",
+            &mut || {
+                quiesced = true;
+                Ok(())
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(fork.id, FORK);
+        assert!(!quiesced, "a stopped source is not touched");
+        assert_eq!(
+            http.paths(),
+            [
+                format!("POST /v1/machines/{ID}/fork"),
+                "GET /v1/operations/op_1".to_owned(),
+                format!("GET /v1/machines/{FORK}"),
+                format!("GET /v1/machines/{FORK}"),
+            ]
+        );
+        let sent = &http.sent()[0];
+        assert!(sent.idempotency_key.is_some());
+        let body: serde_json::Value = serde_json::from_str(sent.body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"name": "box-fork", "desiredState": "running"})
+        );
+    }
+
+    #[test]
+    fn stop_and_fork_quiesces_and_stops_before_forking_and_a_failed_stop_never_forks() {
+        let http = FakeHttp::new();
+        let mut accepted = operation("op_2", "create", "succeeded");
+        accepted["machineId"] = "m_new".into();
+        http.reply(202, operation("op_1", "stop", "succeeded"))
+            .reply(202, accepted)
+            .reply(200, machine("m_new", "running", true));
+        let sent_before_quiesce = std::cell::Cell::new(None);
+        fork_with(
+            &client(&http),
+            ID,
+            SavePlan::Stop,
+            "box-fork",
+            &mut || {
+                sent_before_quiesce.set(Some(http.sent().len()));
+                Ok(())
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(sent_before_quiesce.get(), Some(0));
+        assert_eq!(
+            http.paths(),
+            [
+                format!("POST /v1/machines/{ID}/stop"),
+                format!("POST /v1/machines/{ID}/fork"),
+                "GET /v1/machines/m_new".to_owned(),
+            ]
+        );
+        let http = FakeHttp::new();
+        http.error(409, "operation_conflict");
+        assert!(fork_with(
+            &client(&http),
+            ID,
+            SavePlan::Stop,
+            "box-fork",
+            &mut || Ok(()),
+            &mut |_| {},
+        )
+        .is_err());
+        assert!(!http.paths().iter().any(|path| path.ends_with("/fork")));
+        // A quiesce failure stops nothing.
+        let http = FakeHttp::new();
+        assert!(fork_with(
+            &client(&http),
+            ID,
+            SavePlan::Stop,
+            "box-fork",
+            &mut || Err("locked".into()),
+            &mut |_| {},
+        )
+        .is_err());
+        assert!(http.paths().is_empty());
+    }
+
+    #[test]
+    fn fork_refusals_show_hangars_reason_and_names_are_checked() {
+        let refusal = |status: u16, code: &str, message: &str| {
+            let http = FakeHttp::new();
+            http.reply(
+                status,
+                serde_json::json!({"error": {"code": code, "message": message, "requestId": "r", "retryable": false, "operationId": null}}),
+            );
+            let error = fork_with(
+                &client(&http),
+                ID,
+                SavePlan::Save,
+                "box-fork",
+                &mut || Ok(()),
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(http.paths().len(), 1, "a refusal is not retried");
+            fork_error(&error)
+        };
+        assert_eq!(
+            refusal(
+                409,
+                "operation_conflict",
+                "a machine named \"box-fork\" already exists"
+            ),
+            "a machine named \"box-fork\" already exists"
+        );
+        assert_eq!(
+            refusal(
+                400,
+                "bad_request",
+                "template herdr@x does not support images and forks"
+            ),
+            "template herdr@x does not support images and forks"
+        );
+        assert_eq!(
+            refusal(429, "quota_exceeded", "machine limit reached (5)"),
+            "machine limit reached (5)"
+        );
+        assert_eq!(
+            refusal(404, "not_found", "machine not found"),
+            "the hangar machine no longer exists"
+        );
+        // A failed create operation is reported, not retried.
+        let http = FakeHttp::new();
+        let mut failed = operation("op_1", "create", "failed");
+        failed["machineId"] = "m_new".into();
+        failed["error"] = serde_json::json!({"code": "no_capacity", "message": "full", "requestId": "r", "retryable": true, "operationId": "op_1"});
+        http.reply(202, failed);
+        let error = fork_with(
+            &client(&http),
+            ID,
+            SavePlan::Save,
+            "box-fork",
+            &mut || Ok(()),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), Some(&ErrorCode::NoCapacity));
+        assert_eq!(default_fork_name("box"), "box-fork");
+        let long = default_fork_name(&"a".repeat(63));
+        assert_eq!(long.len(), 63);
+        assert!(validate_fork_name(&long).is_ok());
+        assert_eq!(
+            default_fork_name(&format!("{}-b", "a".repeat(57))),
+            format!("{}-fork", "a".repeat(57))
+        );
+        assert!(validate_fork_name("box-fork").is_ok());
+        for bad in ["", "-x", "Box", "a b", &"a".repeat(64)] {
+            assert!(validate_fork_name(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

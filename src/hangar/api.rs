@@ -379,6 +379,16 @@ pub(crate) struct CreateMachineRequest<'a> {
     pub image_id: Option<&'a str>,
 }
 
+/// A new machine with a copy of a stopped machine's root disk and /data. The sizes are
+/// the source's.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForkMachineRequest<'a> {
+    pub name: &'a str,
+    /// `running` (the server's default) or `stopped`.
+    pub desired_state: &'a str,
+}
+
 // ---------------------------------------------------------------------------
 // Errors.
 
@@ -819,6 +829,24 @@ impl Client {
         let body = serde_json::to_string(request)
             .map_err(|error| HangarError::Invalid(error.to_string()))?;
         self.call("POST", "/v1/machines", Some(body), Some(key), true)
+    }
+
+    /// Returns the `create` operation of the new machine.
+    pub(crate) fn fork_machine(
+        &self,
+        key: &str,
+        source_id: &str,
+        request: &ForkMachineRequest<'_>,
+    ) -> Result<Operation, HangarError> {
+        let body = serde_json::to_string(request)
+            .map_err(|error| HangarError::Invalid(error.to_string()))?;
+        self.call(
+            "POST",
+            &format!("/v1/machines/{}/fork", path_segment(source_id)?),
+            Some(body),
+            Some(key),
+            true,
+        )
     }
 
     pub(crate) fn start_machine(&self, key: &str, id: &str) -> Result<Operation, HangarError> {
@@ -1304,6 +1332,39 @@ mod tests {
             serde_json::json!({"name": "box", "imageId": "im_a"})
         );
         assert!(client.delete_image("k", "../x").is_err());
+    }
+
+    #[test]
+    fn fork_posts_to_the_source_with_a_key_and_only_name_and_state() {
+        let http = FakeHttp::new();
+        let mut accepted = operation("op_1", "create", "queued");
+        accepted["machineId"] = "m_new".into();
+        http.reply(202, accepted);
+        let client = client(&http);
+        let operation = client
+            .fork_machine(
+                "k1",
+                "m_a",
+                &ForkMachineRequest {
+                    name: "a-fork",
+                    desired_state: "running",
+                },
+            )
+            .unwrap();
+        assert_eq!(operation.machine_id, "m_new");
+        assert_eq!(http.paths(), ["POST /v1/machines/m_a/fork"]);
+        let sent = &http.sent()[0];
+        assert_eq!(sent.idempotency_key.as_deref(), Some("k1"));
+        let body: serde_json::Value = serde_json::from_str(sent.body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"name": "a-fork", "desiredState": "running"})
+        );
+        let request = ForkMachineRequest {
+            name: "x",
+            desired_state: "running",
+        };
+        assert!(client.fork_machine("k", "../x", &request).is_err());
     }
 
     #[test]

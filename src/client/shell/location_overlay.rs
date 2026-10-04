@@ -102,10 +102,13 @@ pub(in crate::client::shell) fn render_locations(
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
     // Confirmations have no rows, so their text gets the whole body; Save as image and
-    // the account have few rows and a long explanation below them.
+    // Save as image, Fork machine and the account have few rows and a long explanation
+    // below them.
     let message_area = if matches!(
         dialog.kind,
-        LocationDialogKind::SaveImage(_) | LocationDialogKind::Account
+        LocationDialogKind::SaveImage(_)
+            | LocationDialogKind::Fork(_)
+            | LocationDialogKind::Account
     ) {
         let top = inner.y + 2 + dialog.labels().len() as u16 + 1;
         Rect::new(
@@ -146,12 +149,15 @@ pub(in crate::client::shell) fn render_locations(
             LocationDialogKind::Suspend => " ↵ suspend ",
             LocationDialogKind::Delete(_) | LocationDialogKind::DeleteImage(_) => " ↵ delete ",
             LocationDialogKind::SaveImage(ref request) => request.primary_label(),
+            LocationDialogKind::Fork(ref request) => request.primary_label(),
         }
     };
-    // Save as image cannot proceed while checking or when the machine cannot be saved.
+    // Save as image and Fork machine cannot proceed while checking or when the machine
+    // cannot be used.
     let enabled = !dialog.busy
         && match &dialog.kind {
             LocationDialogKind::SaveImage(request) => request.plan().is_some(),
+            LocationDialogKind::Fork(request) => request.plan().is_some(),
             _ => true,
         };
     let width = display_width(label).max(14);

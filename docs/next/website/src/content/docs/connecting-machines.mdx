@@ -58,6 +58,12 @@ Only a stopped machine can be saved. For a running machine the dialog offers **S
 
 To use an image, choose **Add remote → Create new machine** and pick it under **Source**; the list shows each image's name, creation date and the machine it was saved from. The default source is the latest `herdr` template. A machine created from an image gets the image's root disk and a new, empty `/data`, so sign in to your tools again there. With an image selected as source, **Delete image…** deletes it after confirmation; machines already created from it are not affected.
 
+#### Forks
+
+A fork is a new machine with a full copy of a hangar machine: its root disk **and** its `/data` disk. Choose **Fork machine…** on a hangar remote, enter a name for the new machine (lowercase letters, digits and `-`; the default is `<machine>-fork`), and confirm. Everything on both disks is copied: repositories, your home directory (`/data/home`) and the logins kept there, such as gh, Claude, Codex and SSH keys, so treat a fork like the original. The fork gets its own SSH host keys, machine ID and hostname. Forks count toward your hangar machine limit.
+
+Only a stopped machine can be forked, with the same handling as **Save as image…**: for a running machine the dialog offers **Stop machine and fork**, which stops it exactly like **Stop machine** and then forks it; a suspended machine is resumed first and then stopped; machines from an older template that cannot reset machine identity cannot be forked. Herdr waits until the fork is running and ready, then adds it as a new remote and starts its Herdr session, as **Create new machine** does. The original machine stays stopped; use **Start remote** to keep working on it.
+
 ## Before you connect
 
 You need normal SSH access to the remote machine. Verify it first:

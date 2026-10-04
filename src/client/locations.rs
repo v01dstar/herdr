@@ -471,6 +471,44 @@ pub(super) fn save_image_remote(
     Ok(with_warnings(message, &warnings))
 }
 
+/// Fork machine…: brings the machine to a stopped, uploaded state as `plan` says (the
+/// stop is the same as Stop machine), forks it, then adds the running fork as a remote
+/// as Create new machine does. The source stays stopped.
+pub(super) fn fork_remote(
+    profile: &SavedSshEndpoint,
+    options: &RemoteOptions,
+    plan: hangar::SavePlan,
+    name: &str,
+) -> Result<String, String> {
+    let cloud = options
+        .cloud
+        .as_ref()
+        .ok_or("Fork machine requires a hangar machine")?;
+    validate_binding(profile, Some(cloud))?;
+    hangar::validate_fork_name(name)?;
+    let mut warnings = Vec::new();
+    let mut progress = |_| {};
+    let fork = hangar::fork_machine(
+        cloud.hangar(),
+        plan,
+        name,
+        &mut || {
+            warnings = quiesce_machine(profile, cloud)?;
+            Ok(())
+        },
+        &mut progress,
+    )
+    .map_err(|error| format!("Could not fork into {name}: {}", hangar::fork_error(&error)))?;
+    let source = &cloud.hangar().machine_name;
+    let added = hangar::add_machine(&cloud.hangar().server, &fork, &mut progress)
+        .map_err(|error| format!("Forked {source} into {}. {error}", fork.name))?;
+    let message = format!(
+        "Forked {source} into {}. {added} {source} stays stopped; use Start remote to work on it again.",
+        fork.name
+    );
+    Ok(with_warnings(message, &warnings))
+}
+
 /// Confirmation shown before an image is deleted.
 pub(crate) fn image_delete_confirmation(name: &str) -> String {
     format!(

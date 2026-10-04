@@ -45,6 +45,12 @@ Herdr 不会隐式启动机器。机器停止时，重连、**Test connection**�
 
 要使用镜像，选择 **Add remote → Create new machine**，并在 **Source** 中选择镜像；列表显示每个镜像的名称、创建日期和来源机器。默认来源是最新的 `herdr` 模板。基于镜像创建的机器使用镜像的根磁盘和一个新的空 `/data`，因此需要在新机器上重新登录各工具。将镜像选为来源时，可通过 **Delete image…** 在确认后删除它；已基于该镜像创建的机器不受影响。
 
+#### 派生（Fork）
+
+派生会创建一台完整复制 hangar 机器的新机器：同时复制根磁盘**和** `/data` 磁盘。在 hangar Remote 上选择 **Fork machine…**，输入新机器的名称（小写字母、数字和 `-`，默认为 `<machine>-fork`）后确认。两块磁盘上的所有内容都会被复制：仓库、主目录（`/data/home`）以及保存在其中的登录信息（如 gh、Claude、Codex 和 SSH 密钥），因此请像对待原机器一样对待派生机器。派生机器拥有自己的 SSH 主机密钥、机器 ID 和主机名。派生机器计入 hangar 的机器数量上限。
+
+只能派生已停止的机器，处理方式与 **Save as image…** 相同：对于运行中的机器，弹窗会提供 **Stop machine and fork**，它按 **Stop machine** 的相同步骤停止机器后再派生；已挂起的机器会先恢复再停止；由不支持重置机器身份的旧模板创建的机器无法派生。Herdr 会等待派生机器运行并就绪，然后像 **Create new machine** 一样将其添加为新的 Remote 并启动 Herdr session。原机器保持停止状态，如需继续使用请点击 **Start remote**。
+
 ## 连接前的准备
 
 你需要能够通过普通 SSH 访问远程机器。先验证：
