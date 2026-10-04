@@ -1,0 +1,10 @@
+# Isolate tests from the developer's real Herdr state (see the script).
+experimental = ["setup-scripts"]
+
+[scripts.setup.scratch-env]
+command = { command-line = ".config/nextest-scratch-env.sh", relative-to = "workspace-root" }
+
+[[profile.default.scripts]]
+platform = "cfg(unix)"
+filter = "all()"
+setup = "scratch-env"
