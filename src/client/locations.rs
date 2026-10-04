@@ -734,14 +734,6 @@ pub(super) fn start_remote(
     start_session(profile, options)
 }
 
-pub(super) fn machine_status(options: &RemoteOptions) -> Result<String, String> {
-    let cloud = options
-        .cloud
-        .as_ref()
-        .ok_or("This remote has no hangar machine")?;
-    hangar::machine_status(cloud.hangar()).map_err(|error| error.to_string())
-}
-
 pub(super) fn stop_remote(
     profile: &SavedSshEndpoint,
     options: &RemoteOptions,

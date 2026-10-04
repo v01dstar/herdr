@@ -1,5 +1,6 @@
 use super::super::tests::{hangar_dialog, hangar_dialog_with, shell, MACHINE};
 use super::*;
+use crate::client::shell::render::display_width;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 fn facts(kind: RemoteKind, state: Option<MachineState>) -> RemoteFacts {
@@ -36,10 +37,9 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             .map(|item| item.to_string())
             .collect::<Vec<_>>()
     };
-    // Everything after the Machine group of a plain hangar machine.
+    // Everything after the lifecycle group of a plain hangar machine.
     let rest = |test: &str| {
         let mut rest = vec![
-            "Machine status".to_owned(),
             test.to_owned(),
             "Edit…".into(),
             "Use as default".into(),
@@ -70,9 +70,9 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             facts(RemoteKind::Ssh, None),
             strings(&[
                 "Test connection",
-                "Start session",
                 "Edit…",
                 "Use as default",
+                "Start session",
                 "Remove remote",
             ]),
         ),
@@ -83,9 +83,9 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             },
             strings(&[
                 "Test connection!Disabled; Start session enables it",
-                "Start session",
                 "Edit…",
                 "Use as default",
+                "Start session",
                 "Remove remote",
             ]),
         ),
@@ -115,7 +115,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
         (facts(RemoteKind::Hangar, Some(Stopping)), {
             let mut all = vec![format!("Start!{}", wait(Stopping))];
             all.extend(rest(stopped_test));
-            for item in &mut all[6..8] {
+            for item in &mut all[5..7] {
                 *item = format!("{item}!{}", wait(Stopping));
             }
             all
@@ -126,7 +126,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
                 format!("Stop…!{}", wait(Starting)),
             ];
             all.extend(rest(stopped_test));
-            for item in &mut all[7..9] {
+            for item in &mut all[6..8] {
                 *item = format!("{item}!{}", wait(Starting));
             }
             all
@@ -134,14 +134,14 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
         (facts(RemoteKind::Hangar, Some(Suspending)), {
             let mut all = vec![format!("Resume!{}", wait(Suspending))];
             all.extend(rest(stopped_test));
-            for item in &mut all[6..8] {
+            for item in &mut all[5..7] {
                 *item = format!("{item}!{}", wait(Suspending));
             }
             all
         }),
         (facts(RemoteKind::Hangar, Some(Deleting)), {
             let mut all = rest(stopped_test);
-            for item in &mut all[5..8] {
+            for item in &mut all[4..7] {
                 *item = format!("{item}!{}", wait(Deleting));
             }
             all
@@ -158,7 +158,6 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             strings(&[
                 "Suspend…",
                 "Stop…",
-                "Machine status",
                 "Test connection!Hidden from the sidebar; Show in sidebar first",
                 "Edit…",
                 "Use as default!Already the default for new workspaces",
@@ -175,7 +174,6 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             },
             vec![
                 format!("Start!{SIGN_IN_FIRST}"),
-                format!("Machine status!{SIGN_IN_FIRST}"),
                 stopped_test.into(),
                 "Edit…".into(),
                 "Use as default".into(),
@@ -193,7 +191,6 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             vec![
                 format!("Suspend…!{OFFLINE}"),
                 format!("Stop…!{OFFLINE}"),
-                format!("Machine status!{OFFLINE}"),
                 "Test connection".into(),
                 "Edit…".into(),
                 "Use as default".into(),
@@ -219,7 +216,15 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             .count();
         assert!(starts <= 1, "{state:?}: {labels:?}");
     }
-    // Groups: SSH remotes have no Machine or Copy group; local only Connection.
+    // Machine status is gone: the header shows the state and the view syncs itself.
+    for state in [Running, Stopped, Suspended, Error, Unknown] {
+        let labels = summary(&facts(RemoteKind::Hangar, Some(state)));
+        assert!(
+            labels.iter().all(|label| !label.contains("status")),
+            "{labels:?}"
+        );
+    }
+    // Groups: SSH remotes have no lifecycle or copy group; local only connection.
     let groups = |facts: &RemoteFacts| {
         let mut groups = remote_actions(facts)
             .iter()
@@ -231,7 +236,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
     assert_eq!(
         groups(&facts(RemoteKind::Hangar, Some(Running))),
         [
-            ActionGroup::Machine,
+            ActionGroup::Lifecycle,
             ActionGroup::Connection,
             ActionGroup::Copy,
             ActionGroup::Remove
@@ -261,39 +266,61 @@ fn the_list_shows_local_then_hangar_machines_then_ssh_remotes_then_add() {
         ]
     );
     assert_eq!(dialog.selected_row(), ListRow::Remote(1));
-    assert_eq!(dialog.glyph(ListRow::Local), ("●", Tone::Good));
+    let word = |dialog: &LocationDialog, row| dialog.list_state(row);
+    assert_eq!(word(&dialog, ListRow::Local), None);
     assert_eq!(dialog.suffix(ListRow::Local), "default");
-    assert_eq!(dialog.glyph(ListRow::Remote(1)), ("●", Tone::Good));
-    assert_eq!(dialog.glyph(ListRow::Remote(0)), ("?", Tone::Muted));
+    assert_eq!(
+        word(&dialog, ListRow::Remote(1)),
+        Some(("running".into(), Tone::Good))
+    );
+    assert_eq!(
+        word(&dialog, ListRow::Remote(0)),
+        Some(("offline".into(), Tone::Muted))
+    );
     dialog.view.connected.insert(dialog.profiles[0].id.clone());
-    assert_eq!(dialog.glyph(ListRow::Remote(0)), ("●", Tone::Good));
-    for (state, glyph) in [
-        (MachineState::Suspended, "◐"),
-        (MachineState::Stopped, "○"),
-        (MachineState::Error, "!"),
-        (MachineState::Starting, "…"),
-        (MachineState::Unknown, "?"),
+    assert_eq!(
+        word(&dialog, ListRow::Remote(0)),
+        Some(("connected".into(), Tone::Good))
+    );
+    for (state, expected, tone) in [
+        (MachineState::Suspended, "suspended", Tone::Muted),
+        (MachineState::Stopped, "stopped", Tone::Muted),
+        (MachineState::Error, "error", Tone::Bad),
+        (MachineState::Starting, "starting…", Tone::Warn),
+        (MachineState::Stopping, "stopping…", Tone::Warn),
+        (MachineState::Unknown, "unknown", Tone::Muted),
     ] {
         assert_eq!(
-            hangar_dialog_with(state, false).glyph(ListRow::Remote(1)).0,
-            glyph
+            word(&hangar_dialog_with(state, false), ListRow::Remote(1)),
+            Some((expected.into(), tone)),
+            "{state:?}"
         );
     }
     let hidden = hangar_dialog_with(MachineState::Running, true);
     assert_eq!(hidden.suffix(ListRow::Remote(1)), "hidden");
     let id = dialog.profiles[1].id.clone();
     dialog.sync_notes.insert(id, "offline");
-    assert_eq!(dialog.glyph(ListRow::Remote(1)), ("?", Tone::Muted));
-    assert_eq!(dialog.suffix(ListRow::Remote(1)), "offline");
+    assert_eq!(
+        word(&dialog, ListRow::Remote(1)),
+        Some(("offline".into(), Tone::Muted))
+    );
+    assert_eq!(dialog.suffix(ListRow::Remote(1)), "");
 }
 
 fn key(state: &mut ClientShellState, code: KeyCode) {
-    assert!(state.route_location_key(
-        &crate::input::TerminalKey::from(
-            KeyEvent::new(code, crossterm::event::KeyModifiers::NONE,)
-        ),
-        &mut ClientShellInput::default(),
-    ));
+    press(state, code, crossterm::event::KeyModifiers::NONE);
+}
+
+/// A key as Settings gets it, on whichever tab is open.
+fn press(state: &mut ClientShellState, code: KeyCode, modifiers: crossterm::event::KeyModifiers) {
+    let key = crate::input::TerminalKey::from(KeyEvent::new(code, modifiers));
+    let outcome = &mut ClientShellInput::default();
+    let handled = if matches!(state.overlay, Some(ClientShellOverlay::Settings(_))) {
+        state.route_settings_key(&key, outcome)
+    } else {
+        state.route_location_key(&key, outcome)
+    };
+    assert!(handled, "{code:?}");
 }
 
 fn remotes_shell() -> ClientShellState {
@@ -318,15 +345,19 @@ fn current_mut(state: &mut ClientShellState) -> &mut LocationDialog {
     dialog
 }
 
+/// The settings tab shown, from the settings overlay or the remotes view.
 fn settings_section(state: &ClientShellState) -> Option<ClientSettingsSection> {
     match &state.overlay {
         Some(ClientShellOverlay::Settings(settings)) => Some(settings.section),
+        Some(ClientShellOverlay::Locations(dialog)) if dialog.remotes_open() => {
+            Some(dialog.view.tab.section())
+        }
         _ => None,
     }
 }
 
 #[test]
-fn keyboard_moves_focus_between_panes_and_switches_sub_views() {
+fn keyboard_moves_between_list_and_actions_with_enter_and_esc() {
     let mut state = remotes_shell();
     key(&mut state, KeyCode::Down);
     assert_eq!(
@@ -334,38 +365,31 @@ fn keyboard_moves_focus_between_panes_and_switches_sub_views() {
         ListRow::Remote(0),
         "Remote A"
     );
-    key(&mut state, KeyCode::Up);
+    key(&mut state, KeyCode::Char('k'));
     assert_eq!(current(&state).profile().unwrap().label, "box");
-    // Enter on a remote focuses its actions; ↑/↓ then move between actions.
+    // Enter on a remote focuses its actions; ↑/↓ (j/k) then move between actions.
     key(&mut state, KeyCode::Enter);
     assert_eq!(current(&state).view.focus, Focus::Actions);
     assert_eq!(
         current(&state).selected_action().unwrap().action,
         RemoteAction::Suspend
     );
-    key(&mut state, KeyCode::Down);
+    key(&mut state, KeyCode::Char('j'));
     assert_eq!(current(&state).view.action, Some(RemoteAction::Stop));
     assert_eq!(current(&state).profile().unwrap().label, "box");
-    // Esc returns to the list; Tab toggles.
+    // Esc returns to the list.
     key(&mut state, KeyCode::Esc);
     assert_eq!(current(&state).view.focus, Focus::List);
     assert!(state.overlay.is_some());
-    key(&mut state, KeyCode::Tab);
-    assert_eq!(current(&state).view.focus, Focus::Actions);
-    key(&mut state, KeyCode::BackTab);
-    assert_eq!(current(&state).view.focus, Focus::List);
-    // Add remote has no actions: Tab stays on the list.
+    // Add remote has no actions: Enter opens it instead.
     current_mut(&mut state).select_row(ListRow::Add);
-    key(&mut state, KeyCode::Tab);
-    assert_eq!(current(&state).view.focus, Focus::List);
-    // 1/2/3 switch sub-views.
+    key(&mut state, KeyCode::Enter);
+    assert!(matches!(current(&state).kind, LocationDialogKind::Add(_)));
+    key(&mut state, KeyCode::Esc);
+    assert!(matches!(current(&state).kind, LocationDialogKind::Manage));
+    assert_eq!(current(&state).selected_row(), ListRow::Add);
+    // Digits no longer switch anything.
     key(&mut state, KeyCode::Char('2'));
-    assert_eq!(current(&state).view.tab, RemotesTab::Images);
-    assert!(state.locations.images.is_some(), "images are listed");
-    key(&mut state, KeyCode::Char('3'));
-    assert_eq!(current(&state).view.tab, RemotesTab::Account);
-    assert!(state.locations.usage.is_some(), "usage is read");
-    key(&mut state, KeyCode::Char('1'));
     assert_eq!(current(&state).view.tab, RemotesTab::Remotes);
     // Esc on the list closes Settings.
     key(&mut state, KeyCode::Esc);
@@ -373,56 +397,122 @@ fn keyboard_moves_focus_between_panes_and_switches_sub_views() {
 }
 
 #[test]
-fn left_and_right_always_switch_settings_tabs() {
-    for (tab, focus, busy, code, expected) in [
-        (
-            RemotesTab::Remotes,
-            Focus::List,
-            false,
-            KeyCode::Right,
-            ClientSettingsSection::Theme,
-        ),
-        (
-            RemotesTab::Remotes,
-            Focus::Actions,
-            false,
-            KeyCode::Right,
-            ClientSettingsSection::Theme,
-        ),
-        (
-            RemotesTab::Images,
-            Focus::Actions,
-            false,
-            KeyCode::Left,
-            ClientSettingsSection::Integrations,
-        ),
-        (
-            RemotesTab::Account,
-            Focus::List,
-            false,
-            KeyCode::Right,
-            ClientSettingsSection::Theme,
-        ),
-        (
-            RemotesTab::Remotes,
-            Focus::Actions,
-            true,
-            KeyCode::Left,
-            ClientSettingsSection::Integrations,
-        ),
-    ] {
-        let mut state = remotes_shell();
-        let dialog = current_mut(&mut state);
-        dialog.view.tab = tab;
-        dialog.view.focus = focus;
-        dialog.busy = busy;
-        key(&mut state, code);
-        assert_eq!(
-            settings_section(&state),
-            Some(expected),
-            "{tab:?} {focus:?} busy={busy}"
-        );
+fn every_tab_key_cycles_through_all_eight_settings_tabs_and_wraps() {
+    use crossterm::event::KeyModifiers as M;
+    let all = ClientSettingsSection::ALL;
+    assert_eq!(
+        all.iter()
+            .map(|section| section.label())
+            .collect::<Vec<_>>(),
+        [
+            "theme",
+            "indicators",
+            "sound",
+            "toasts",
+            "integrations",
+            "remotes",
+            "images",
+            "account"
+        ]
+    );
+    let keys = [
+        (KeyCode::Right, M::NONE, 1),
+        (KeyCode::Tab, M::NONE, 1),
+        (KeyCode::Char('l'), M::NONE, 1),
+        (KeyCode::Left, M::NONE, -1),
+        (KeyCode::BackTab, M::SHIFT, -1),
+        (KeyCode::Char('h'), M::NONE, -1),
+    ];
+    for start in all {
+        let views: Vec<(Focus, bool)> = match start.remotes_tab() {
+            Some(_) => vec![
+                (Focus::List, false),
+                (Focus::Actions, false),
+                (Focus::List, true),
+                (Focus::Actions, true),
+            ],
+            None => vec![(Focus::List, false)],
+        };
+        for (focus, busy) in views {
+            for (code, modifiers, delta) in keys {
+                let mut state = remotes_shell();
+                match start.remotes_tab() {
+                    Some(tab) => {
+                        let dialog = current_mut(&mut state);
+                        dialog.view.tab = tab;
+                        dialog.view.focus = focus;
+                        dialog.busy = busy;
+                    }
+                    None => {
+                        state.close_location();
+                        state.open_settings_overlay();
+                        state.select_settings_section(*start, &mut ClientShellInput::default());
+                    }
+                }
+                assert_eq!(settings_section(&state), Some(*start));
+                press(&mut state, code, modifiers);
+                assert_eq!(
+                    settings_section(&state),
+                    Some(start.step(delta)),
+                    "{start:?} {focus:?} busy={busy} {code:?}"
+                );
+            }
+        }
     }
+    // Holding → never sticks: two full rounds from theme, through every tab.
+    let mut state = remotes_shell();
+    state.close_location();
+    state.open_settings_overlay();
+    let mut seen = Vec::new();
+    for _ in 0..all.len() * 2 {
+        key(&mut state, KeyCode::Right);
+        seen.push(settings_section(&state).unwrap());
+    }
+    let expected: Vec<_> = (1..=all.len() * 2)
+        .map(|offset| all[offset % all.len()])
+        .collect();
+    assert_eq!(seen, expected);
+    // While a remote operation started there still runs, the remotes view cannot
+    // open: cycling passes over its tabs instead of closing Settings.
+    let (_send, receive) = mpsc::channel();
+    state.locations.job = Some((state.locations.epoch, receive));
+    state.close_location();
+    state.open_settings_overlay();
+    state.select_settings_section(
+        ClientSettingsSection::Integrations,
+        &mut ClientShellInput::default(),
+    );
+    key(&mut state, KeyCode::Right);
+    assert_eq!(settings_section(&state), Some(ClientSettingsSection::Theme));
+    key(&mut state, KeyCode::Left);
+    assert_eq!(
+        settings_section(&state),
+        Some(ClientSettingsSection::Integrations)
+    );
+}
+
+#[test]
+fn opening_the_images_and_account_tabs_fetches_what_they_show() {
+    let mut state = remotes_shell();
+    key(&mut state, KeyCode::Right);
+    assert_eq!(current(&state).view.tab, RemotesTab::Images);
+    assert_eq!(current(&state).view.focus, Focus::List);
+    assert!(state.locations.images.is_some(), "images are listed");
+    key(&mut state, KeyCode::Right);
+    assert_eq!(current(&state).view.tab, RemotesTab::Account);
+    assert!(state.locations.usage.is_some(), "usage is read");
+    // From the settings overlay straight to the images tab: the view opens on it.
+    state.close_location();
+    state.locations.images = None;
+    state.open_settings_overlay();
+    state.select_settings_section(
+        ClientSettingsSection::Images,
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(current(&state).view.tab, RemotesTab::Images);
+    assert!(state.locations.images.is_some());
+    assert!(state.locations.sync.is_some(), "the remotes sync too");
+    state.close_location();
 }
 
 #[test]
@@ -473,12 +563,12 @@ fn the_selected_action_stays_valid_when_a_refresh_changes_the_actions() {
     };
     let mut state = remotes_shell();
     current_mut(&mut state).view.focus = Focus::Actions;
-    // Kept by identity: Machine status is offered in both states.
-    current_mut(&mut state).select_action(RemoteAction::Status);
+    // Kept by identity: Edit… is offered in both states, at another place.
+    current_mut(&mut state).select_action(RemoteAction::Edit);
     deliver(&mut state, MachineState::Stopped);
     assert_eq!(
         current(&state).selected_action().unwrap().action,
-        RemoteAction::Status
+        RemoteAction::Edit
     );
     // Gone: the action now at its place is selected (Suspend… → Start).
     deliver(&mut state, MachineState::Running);
@@ -583,7 +673,8 @@ fn images_view_lists_details_and_returns_from_delete_to_the_same_image() {
     ] {
         assert!(text.contains(part), "{part}\n{text}");
     }
-    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Enter);
+    assert_eq!(current(&state).view.focus, Focus::Actions);
     key(&mut state, KeyCode::Down);
     key(&mut state, KeyCode::Enter);
     let LocationDialogKind::DeleteImage(request) = &current(&state).kind else {
@@ -632,10 +723,11 @@ fn images_view_explains_how_to_save_an_image_when_there_is_none() {
     let text = screen(&state, 120, 40);
     assert!(text.contains("No images yet."), "{text}");
     assert!(text.contains("Save as image…"), "{text}");
+    assert!(text.contains("on the remotes tab"), "{text}");
     current_mut(&mut state).view.images =
-        Some(Err("Sign in on the Account tab to list your images.".into()));
-    assert!(screen(&state, 120, 40).contains("Sign in on the Account tab"));
-    key(&mut state, KeyCode::Tab);
+        Some(Err("Sign in on the account tab to list your images.".into()));
+    assert!(screen(&state, 120, 40).contains("Sign in on the account tab"));
+    key(&mut state, KeyCode::Enter);
     assert_eq!(
         current(&state).view.focus,
         Focus::List,
@@ -683,6 +775,10 @@ fn click(state: &mut ClientShellState, hit: RemotesHit) {
         .iter()
         .find(|(_, candidate)| *candidate == hit)
         .unwrap_or_else(|| panic!("{hit:?} is not shown"));
+    click_at(state, rect);
+}
+
+fn click_at(state: &mut ClientShellState, rect: Rect) {
     state.handle_mouse(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -719,9 +815,9 @@ fn clicks_select_list_items_run_actions_and_switch_sub_views() {
     );
     assert!(matches!(current(&state).kind, LocationDialogKind::Manage));
     assert_eq!(current(&state).view.action, Some(RemoteAction::Stop));
-    click(&mut state, RemotesHit::Tab(RemotesTab::Account));
+    click_tab(&mut state, ClientSettingsSection::Account);
     assert_eq!(current(&state).view.tab, RemotesTab::Account);
-    click(&mut state, RemotesHit::Tab(RemotesTab::Images));
+    click_tab(&mut state, ClientSettingsSection::Images);
     assert_eq!(current(&state).view.tab, RemotesTab::Images);
     with_images(
         &mut state,
@@ -737,6 +833,27 @@ fn clicks_select_list_items_run_actions_and_switch_sub_views() {
         current(&state).kind,
         LocationDialogKind::DeleteImage(_)
     ));
+    // A settings tab leads out of the view, and back in on the tab clicked.
+    key(&mut state, KeyCode::Esc);
+    click_tab(&mut state, ClientSettingsSection::Sound);
+    assert_eq!(settings_section(&state), Some(ClientSettingsSection::Sound));
+    click_tab(&mut state, ClientSettingsSection::Account);
+    assert_eq!(
+        settings_section(&state),
+        Some(ClientSettingsSection::Account)
+    );
+    state.close_location();
+}
+
+fn click_tab(state: &mut ClientShellState, section: ClientSettingsSection) {
+    state.compose(120, 40).unwrap();
+    let (rect, _) = *state
+        .hits
+        .settings_tabs
+        .iter()
+        .find(|(_, candidate)| *candidate == section)
+        .unwrap_or_else(|| panic!("{section:?} tab is not shown"));
+    click_at(state, rect);
 }
 
 /// The rendered dialog as text, trailing spaces trimmed.
@@ -782,6 +899,7 @@ fn rich_shell() -> ClientShellState {
             image_id: None,
             forked_from: None,
             snapshots: Some(true),
+            last_error: None,
         },
     );
     dialog.view.focus = Focus::Actions;
@@ -789,56 +907,140 @@ fn rich_shell() -> ClientShellState {
     state
 }
 
+/// The lines of the details pane (right of the separator), trimmed.
+fn details_pane(text: &str) -> Vec<String> {
+    // Popup border, list, details, popup border.
+    text.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('│').collect();
+            (parts.len() >= 4).then(|| parts[2].trim().to_owned())
+        })
+        .collect()
+}
+
 #[test]
-fn the_remotes_view_renders_list_details_and_grouped_actions() {
+fn the_remotes_tab_renders_list_details_and_one_column_of_actions() {
     let state = rich_shell();
     let text = screen(&state, 120, 40);
     println!("{text}");
     for part in [
-        "Remotes · Images · Account",
+        "theme  indicators  sound  toasts  integrations  remotes  images  account",
         "@octo",
-        "  ● Local",
+        "    Local",
         "default",
-        "▸ ● box",
-        "  ? Remote A",
+        "▸ ⇄ box",
+        "running",
+        "  ⇄ Remote A",
+        "offline",
         "  + Add remote",
         "box · hangar · running",
-        "hangar.test · herdr@2026-10-03.2",
-        "2 vCPU · 4 GiB RAM · 8 GiB root · 20 GiB /data",
-        "Machine",
-        "Connection",
-        "Copy",
-        "Remove",
-        "▸ Suspend…",
-        "Save as image…",
+        "herdr@2026-10-03.2 · 2 vCPU · 4 GiB RAM · 8 GiB",
+        "root · 20 GiB /data",
         "Delete machine…",
-        "↑↓ select  ↵ run  tab/esc list",
+        "▸ Suspend…",
+        "↑↓ select  ↵ run  esc back to list  ←→ tab",
     ] {
         assert!(text.contains(part), "{part}\n{text}");
     }
-    // The settings tabs stay.
-    assert!(text.contains("Remotes"), "{text}");
+    for gone in [
+        "Remotes · Images · Account",
+        "Machine status",
+        "Machine ",
+        "Connection",
+        "Copy",
+        "1-3",
+        "●",
+        "◐",
+        "○",
+    ] {
+        assert!(!text.contains(gone), "{gone}\n{text}");
+    }
+    // One column, groups separated by one blank line.
+    let pane = details_pane(&text);
+    let start = pane.iter().position(|line| line == "▸ Suspend…").unwrap();
+    assert_eq!(
+        pane[start..start + 13],
+        [
+            "▸ Suspend…",
+            "Stop…",
+            "",
+            "Test connection",
+            "Edit…",
+            "Use as default",
+            "Hide from sidebar",
+            "",
+            "Save as image…",
+            "Fork…",
+            "",
+            "Delete machine…",
+            "",
+        ]
+    );
 }
 
 #[test]
-fn ssh_and_local_details_show_only_their_actions() {
+fn ssh_local_and_stopped_details_show_only_their_actions() {
     let mut state = rich_shell();
     current_mut(&mut state).location = 1;
     let text = screen(&state, 120, 40);
-    assert!(text.contains("Remote A · ssh · not connected"), "{text}");
+    let pane = details_pane(&text);
+    assert!(text.contains("Remote A · ssh · offline"), "{text}");
     assert!(text.contains("demo-a · session work"), "{text}");
-    assert!(text.contains("Remove remote"), "{text}");
-    assert!(!text.contains("Machine status"), "{text}");
+    let start = pane
+        .iter()
+        .position(|line| line.ends_with("Test connection"))
+        .unwrap();
+    assert_eq!(
+        pane[start + 1..start + 6],
+        [
+            "Edit…",
+            "Use as default",
+            "Start session",
+            "",
+            "Remove remote"
+        ]
+    );
     assert!(!text.contains("Save as image"), "{text}");
     current_mut(&mut state).location = 0;
     let text = screen(&state, 120, 40);
     assert!(text.contains("Local · this computer"), "{text}");
     assert!(text.contains("Use as default"), "{text}");
     assert!(!text.contains("Test connection"), "{text}");
+    // A stopped machine: Start, then the rest; no Suspend… or Stop….
+    let mut state = rich_shell();
+    let details = current(&state).view.details.clone();
+    *current_mut(&mut state) = hangar_dialog_with(MachineState::Stopped, false);
+    current_mut(&mut state).view.details = details;
+    let text = screen(&state, 120, 40);
+    let pane = details_pane(&text);
+    let start = pane.iter().position(|line| line == "Start").unwrap();
+    assert_eq!(pane[start + 1], "");
+    assert_eq!(pane[start + 2], "Test connection");
+    assert!(
+        !text.contains("Suspend…") && !text.contains("Stop…"),
+        "{text}"
+    );
+    assert!(text.contains("box · hangar · stopped"), "{text}");
 }
 
 #[test]
-fn small_terminals_still_show_the_selected_action() {
+fn a_failed_machine_shows_its_last_error_under_the_header() {
+    let mut state = remotes_shell();
+    *current_mut(&mut state) = hangar_dialog_with(MachineState::Error, false);
+    current_mut(&mut state).view.details.insert(
+        ("https://hangar.test".into(), MACHINE.into()),
+        MachineDetails {
+            last_error: Some("disk full".into()),
+            ..Default::default()
+        },
+    );
+    let text = screen(&state, 120, 40);
+    assert!(text.contains("box · hangar · error"), "{text}");
+    assert!(text.contains("last error: disk full"), "{text}");
+}
+
+#[test]
+fn small_terminals_scroll_the_actions_to_the_selection() {
     let mut state = rich_shell();
     current_mut(&mut state).view.action = Some(RemoteAction::Remove);
     let text = screen(&state, 60, 18);
@@ -848,6 +1050,8 @@ fn small_terminals_still_show_the_selected_action() {
         text.contains("box · hangar · running"),
         "the header stays\n{text}"
     );
+    // The active tab stays visible in the narrow tab strip.
+    assert!(text.contains("remotes"), "{text}");
     // Too small for the popup: nothing is drawn, nothing panics.
     let area = Rect::new(0, 0, 20, 6);
     let mut buffer = Buffer::empty(area);
@@ -861,7 +1065,89 @@ fn small_terminals_still_show_the_selected_action() {
 }
 
 #[test]
-fn snapshots_of_the_images_and_account_views() {
+fn the_tab_strip_fits_the_popup_and_keeps_the_active_tab_visible_when_narrow() {
+    use crate::client::shell::render::layout_settings_tabs;
+    // At the settings popup width (76, so 74 inside) every tab fits, padded.
+    let (slots, left, right) = layout_settings_tabs(74, ClientSettingsSection::Theme, false);
+    assert_eq!(slots.len(), 8);
+    assert!(!left && !right);
+    assert_eq!(slots[0].text, " theme ");
+    // With the integrations badge they still all fit, packed.
+    let (slots, left, right) = layout_settings_tabs(74, ClientSettingsSection::Account, true);
+    assert_eq!(slots.len(), 8);
+    assert!(!left && !right);
+    for width in 8..=74u16 {
+        for badge in [false, true] {
+            for active in ClientSettingsSection::ALL {
+                let (slots, left, right) = layout_settings_tabs(width, *active, badge);
+                let shown = slots
+                    .iter()
+                    .find(|slot| slot.section == *active)
+                    .unwrap_or_else(|| panic!("{active:?} hidden at {width}"));
+                let end = slots
+                    .iter()
+                    .map(|slot| slot.x + display_width(&slot.text))
+                    .max()
+                    .unwrap();
+                // The last tab ends before the `›` marker when there is one.
+                assert!(
+                    end <= width.saturating_sub(if right { 2 } else { 0 })
+                        || display_width(&shown.text) + 4 > width,
+                    "{active:?} at {width}: {slots:?}"
+                );
+                assert_eq!(left, slots[0].section != ClientSettingsSection::ALL[0]);
+                assert_eq!(
+                    right,
+                    slots.last().unwrap().section != *ClientSettingsSection::ALL.last().unwrap()
+                );
+            }
+        }
+    }
+    // Rendered narrow: the active tab is drawn and clickable, with markers for the rest.
+    let mut state = remotes_shell();
+    current_mut(&mut state).view.tab = RemotesTab::Account;
+    let text = screen(&state, 44, 20);
+    println!("{text}");
+    assert!(text.contains("account"), "{text}");
+    assert!(text.contains('‹'), "{text}");
+    state.compose(44, 20).unwrap();
+    assert!(state
+        .hits
+        .settings_tabs
+        .iter()
+        .any(|(_, section)| *section == ClientSettingsSection::Account));
+}
+
+#[test]
+fn render_snapshots() {
+    // Remotes: a running hangar machine (actions focused).
+    let mut state = rich_shell();
+    println!(
+        "remotes, running hangar machine (120x40):\n{}",
+        screen(&state, 120, 40)
+    );
+    // A stopped hangar machine.
+    let details = current(&state).view.details.clone();
+    let account = current(&state).account.clone();
+    *current_mut(&mut state) = hangar_dialog_with(MachineState::Stopped, false);
+    current_mut(&mut state).view.details = details.clone();
+    current_mut(&mut state).account = account.clone();
+    println!(
+        "remotes, stopped hangar machine (120x40):\n{}",
+        screen(&state, 120, 40)
+    );
+    // SSH and local (list focused).
+    let mut state = rich_shell();
+    current_mut(&mut state).view.focus = Focus::List;
+    current_mut(&mut state).location = 1;
+    println!("remotes, SSH remote (120x40):\n{}", screen(&state, 120, 40));
+    current_mut(&mut state).location = 0;
+    println!("remotes, local (120x40):\n{}", screen(&state, 120, 40));
+    // Small terminal.
+    let mut state = rich_shell();
+    current_mut(&mut state).view.action = Some(RemoteAction::Fork);
+    println!("remotes, 60x18:\n{}", screen(&state, 60, 18));
+    // Images.
     let mut state = rich_shell();
     with_images(
         &mut state,
@@ -871,7 +1157,8 @@ fn snapshots_of_the_images_and_account_views() {
         ],
     );
     current_mut(&mut state).view.focus = Focus::List;
-    println!("{}", screen(&state, 120, 40));
+    println!("images (120x40):\n{}", screen(&state, 120, 40));
+    // Account.
     let dialog = current_mut(&mut state);
     dialog.view.tab = RemotesTab::Account;
     dialog.view.usage = Some(Ok(Usage {
@@ -887,11 +1174,31 @@ fn snapshots_of_the_images_and_account_views() {
         ..Default::default()
     }));
     let text = screen(&state, 120, 40);
-    println!("{text}");
+    println!("account (120x40):\n{text}");
     assert!(
         text.contains("Storage   3.0 GiB of 20.0 GiB stored (15%)"),
         "{text}"
     );
+    assert!(text.contains("Switch account…"), "{text}");
+}
+
+#[test]
+fn the_remote_icon_is_one_cell_and_names_truncate_cleanly() {
+    use crate::client::shell::endpoints::REMOTE_ICON;
+    assert_eq!(display_width(REMOTE_ICON), 1);
+    let mut state = rich_shell();
+    current_mut(&mut state).profiles[1].label = "a-very-long-hangar-machine-name".into();
+    let text = screen(&state, 76, 30);
+    let row = text
+        .lines()
+        .find(|line| line.contains("▸ ⇄ a-very"))
+        .unwrap_or_else(|| panic!("{text}"));
+    // The name is cut before the state word, which stays whole.
+    assert!(row.contains("running"), "{row}");
+    // The list keeps its width: the separator is where the other rows have it.
+    let local = text.lines().find(|line| line.contains("Local ")).unwrap();
+    let left = |line: &str| display_width(line.split('│').nth(1).unwrap());
+    assert_eq!(left(row), left(local), "{row}\n{local}");
 }
 
 #[test]

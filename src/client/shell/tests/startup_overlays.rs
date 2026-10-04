@@ -1078,12 +1078,15 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .map(|(rect, _)| *rect)
         .expect("integrations tab");
     let settings_buffer = settings.to_ratatui_buffer().expect("settings buffer");
+    let dot = (integrations_tab.x..integrations_tab.right())
+        .find(|x| settings_buffer[(*x, integrations_tab.y)].symbol() == "●")
+        .expect("badge dot");
     assert_eq!(
-        settings_buffer[(integrations_tab.x + 1, integrations_tab.y)].fg,
+        settings_buffer[(dot, integrations_tab.y)].fg,
         state.config.palette.accent
     );
     assert_eq!(
-        settings_buffer[(integrations_tab.x + 3, integrations_tab.y)].fg,
+        settings_buffer[(dot + 2, integrations_tab.y)].fg,
         state.config.palette.overlay1
     );
 }

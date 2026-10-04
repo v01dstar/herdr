@@ -674,12 +674,15 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
         .expect("remote machine row")
         .rect;
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    assert_ne!(buffer[(local.right() - 1, local.y)].symbol(), "●");
-    assert_eq!(buffer[(remote.right() - 1, remote.y)].symbol(), "●");
-    assert_eq!(
-        buffer[(remote.right() - 1, remote.y)].fg,
-        state.config.palette.green
-    );
+    let row = |rect: ratatui::layout::Rect| {
+        (rect.x..rect.right())
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect::<String>()
+    };
+    // Local has no icon; an online remote has the remote icon and nothing at the right
+    // (no status dot: those are agent states).
+    assert_eq!(row(local).trim_end(), " ▾ Local");
+    assert_eq!(row(remote).trim_end(), " ▾ ⇄ Build");
 
     state.sidebar_collapsed = true;
     let frame = state.compose(100, 28).expect("collapsed endpoint frame");
@@ -698,8 +701,90 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
         .expect("collapsed remote machine row")
         .rect;
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    assert_ne!(buffer[(local.right() - 1, local.y)].symbol(), "●");
-    assert_eq!(buffer[(remote.right() - 1, remote.y)].symbol(), "●");
+    let row = |rect: ratatui::layout::Rect| {
+        (rect.x..rect.right())
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect::<String>()
+    };
+    // Three cells: the remote icon does not fit next to the number, so it is left out.
+    assert_eq!(row(local).trim_end(), "▾L");
+    assert_eq!(row(remote).trim_end(), "▾2");
+}
+
+/// The machine rows of the sidebar as text.
+fn machine_rows(state: &mut ClientShellState, width: u16, collapsed: bool) -> Vec<String> {
+    state.sidebar_collapsed = collapsed;
+    let frame = state.compose(width, 28).expect("frame");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    state
+        .hits
+        .machines
+        .iter()
+        .map(|hit| {
+            (hit.rect.x..hit.rect.right())
+                .map(|x| buffer[(x, hit.rect.y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn sidebar_machine_rows_use_the_remote_icon_and_words_not_dots() {
+    let (mut state, id) = state_with_remote();
+    let expanded = |state: &mut ClientShellState| machine_rows(state, 100, false);
+    let collapsed = |state: &mut ClientShellState| machine_rows(state, 100, true);
+    let mut snapshots = Vec::new();
+    for (status, word, mark) in [
+        (ClientEndpointStatus::Online, "", ""),
+        (ClientEndpointStatus::Connecting, "connecting…", "…"),
+        (ClientEndpointStatus::Reconnecting, "reconnecting…", "…"),
+        (ClientEndpointStatus::Disabled, "disabled", ""),
+        (ClientEndpointStatus::Attention, "! error", "!"),
+    ] {
+        state.set_endpoint_status(&id, status);
+        let rows = expanded(&mut state);
+        snapshots.push(format!("{status:?} expanded:\n{}", rows.join("\n")));
+        assert!(rows[1].starts_with(" ▾ ⇄ Build"), "{rows:?}");
+        assert!(rows[1].trim_end().ends_with(word), "{status:?}: {rows:?}");
+        let rows = collapsed(&mut state);
+        snapshots.push(format!("{status:?} collapsed:\n{}", rows.join("\n")));
+        assert_eq!(rows[1], format!("▾2{mark:1}"), "{status:?}");
+        for row in rows.iter().chain(expanded(&mut state).iter()) {
+            for dot in ['●', '◐', '○', '·'] {
+                assert!(!row.contains(dot), "{status:?}: {row}");
+            }
+        }
+    }
+    // Disabled reads "disabled" whatever the machine's state, dimmed.
+    state.set_endpoint_status(&id, ClientEndpointStatus::Disabled);
+    let frame = state.compose(100, 28).expect("frame");
+    let buffer = frame.to_ratatui_buffer().expect("buffer");
+    let hit = state.hits.machines[1].rect;
+    let word = hit.right() - 1;
+    assert_eq!(buffer[(word, hit.y)].symbol(), "d");
+    assert_eq!(buffer[(word, hit.y)].fg, state.config.palette.overlay0);
+    // Connecting is yellow.
+    state.set_endpoint_status(&id, ClientEndpointStatus::Connecting);
+    let frame = state.compose(100, 28).expect("frame");
+    let buffer = frame.to_ratatui_buffer().expect("buffer");
+    assert_eq!(buffer[(word, hit.y)].fg, state.config.palette.yellow);
+    // An auth failure says so.
+    state.set_endpoint_status(&id, ClientEndpointStatus::Attention);
+    state.set_machine_diagnostic(&id, "Permission denied (publickey)".into());
+    let rows = expanded(&mut state);
+    assert!(rows[1].trim_end().ends_with("! auth"), "{rows:?}");
+    snapshots.push(format!("auth expanded:\n{}", rows.join("\n")));
+    // A narrow sidebar truncates the name and keeps the word.
+    let (mut state, id) = state_with_remote();
+    state.set_endpoint_status(&id, ClientEndpointStatus::Reconnecting);
+    state.endpoints[1].label = "a-very-long-machine-name".into();
+    state.sidebar_width = 22;
+    state.sidebar_width_manual = true;
+    let rows = expanded(&mut state);
+    snapshots.push(format!("narrow expanded:\n{}", rows.join("\n")));
+    // The one-cell icon keeps the name cut one space before the word.
+    assert_eq!(rows[1], " ▾ ⇄ a- reconnecting…", "{rows:?}");
+    println!("{}", snapshots.join("\n\n"));
 }
 
 #[test]
@@ -2089,7 +2174,7 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         state.endpoint_status(&endpoint_id),
         Some(ClientEndpointStatus::Reconnecting)
     );
-    assert!(text.contains("◐ reconnecting"), "frame: {text}");
+    assert!(text.contains("⇄ Build  reconnecting…"), "frame: {text}");
     assert!(text.contains("Build · remote agent"), "frame: {text}");
     assert!(
         text.contains("LIVE"),

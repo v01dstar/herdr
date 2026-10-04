@@ -84,7 +84,10 @@ pub(in crate::client::shell) fn render_settings_overlay(
     );
     let mut choice_hits = Vec::new();
     match settings.section {
-        ClientSettingsSection::Remotes => {}
+        // These tabs are the remotes view; selecting one opens it instead.
+        ClientSettingsSection::Remotes
+        | ClientSettingsSection::Images
+        | ClientSettingsSection::Account => {}
         ClientSettingsSection::Theme => {
             let visible = usize::from(content.height);
             let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
@@ -371,8 +374,95 @@ fn render_integrations(
     }
 }
 
+/// One visible tab of the strip: its section, where it starts (relative to the strip)
+/// and the text drawn there (highlighted when active).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::client::shell) struct TabSlot {
+    pub section: ClientSettingsSection,
+    pub x: u16,
+    pub text: String,
+}
+
+/// The settings tab strip laid out in `width` columns. Tabs are padded (` theme `) when
+/// all fit, else packed two then one space apart, and otherwise scrolled so the active
+/// tab is always shown, with `‹`/`›` where tabs are hidden. Pure.
+pub(in crate::client::shell) fn layout_settings_tabs(
+    width: u16,
+    active: ClientSettingsSection,
+    integration_badge: bool,
+) -> (Vec<TabSlot>, bool, bool) {
+    let all = ClientSettingsSection::ALL;
+    let texts: Vec<String> = all
+        .iter()
+        .map(|section| {
+            if *section == ClientSettingsSection::Integrations && integration_badge {
+                format!("● {}", section.label())
+            } else {
+                section.label().to_owned()
+            }
+        })
+        .collect();
+    let widths: Vec<u16> = texts.iter().map(|text| display_width(text)).collect();
+    // Tabs `range` from `start`: padded (one space each side, so two between labels)
+    // or bare and `gap` apart.
+    let place = |range: std::ops::Range<usize>, start: u16, pad: bool, gap: u16| {
+        let mut x = start;
+        range
+            .map(|index| {
+                let text = if pad {
+                    format!(" {} ", texts[index])
+                } else {
+                    texts[index].clone()
+                };
+                let slot = TabSlot {
+                    section: all[index],
+                    x,
+                    text,
+                };
+                x = x.saturating_add(widths[index] + if pad { 2 } else { gap });
+                slot
+            })
+            .collect::<Vec<_>>()
+    };
+    let packed = |range: std::ops::Range<usize>, gap: u16| -> u16 {
+        let count = range.len() as u16;
+        widths[range].iter().sum::<u16>() + count.saturating_sub(1) * gap
+    };
+    if packed(0..all.len(), 2) + 2 <= width {
+        return (place(0..all.len(), 0, true, 0), false, false);
+    }
+    for gap in [2, 1] {
+        if packed(0..all.len(), gap) < width {
+            return (place(0..all.len(), 1, false, gap), false, false);
+        }
+    }
+    let packed = |range: std::ops::Range<usize>| packed(range, 1);
+    // Scroll: grow a window around the active tab, room kept for both markers.
+    let room = width.saturating_sub(4);
+    let active = all
+        .iter()
+        .position(|section| *section == active)
+        .unwrap_or(0);
+    let (mut start, mut end) = (active, active + 1);
+    loop {
+        let mut grew = false;
+        if end < all.len() && packed(start..end + 1) <= room {
+            end += 1;
+            grew = true;
+        }
+        if start > 0 && packed(start - 1..end) <= room {
+            start -= 1;
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    (place(start..end, 2, false, 1), start > 0, end < all.len())
+}
+
 /// Draws the settings tab strip on the second row of `inner` and the rule below it.
-/// Shared with the remotes dialog, which is the Remotes tab.
+/// Shared with the remotes view, which draws the remotes, images and account tabs.
 pub(in crate::client::shell) fn render_settings_tabs(
     buffer: &mut Buffer,
     inner: Rect,
@@ -380,46 +470,52 @@ pub(in crate::client::shell) fn render_settings_tabs(
     integration_badge: bool,
     palette: &Palette,
 ) -> Vec<(Rect, ClientSettingsSection)> {
-    let mut tab_x = inner.x;
+    let (slots, more_left, more_right) =
+        layout_settings_tabs(inner.width, active_section, integration_badge);
+    let y = inner.y + 1;
+    let muted = Style::default().fg(palette.overlay1).bg(palette.panel_bg);
+    if more_left {
+        put_text(buffer, inner.x, y, 1, "‹", muted);
+    }
+    if more_right {
+        put_text(buffer, inner.right().saturating_sub(1), y, 1, "›", muted);
+    }
+    let right = inner.right().saturating_sub(if more_right { 2 } else { 0 });
     let mut tab_hits = Vec::new();
-    for section in ClientSettingsSection::ALL {
-        let badge = *section == ClientSettingsSection::Integrations && integration_badge;
-        let label = if badge {
-            format!(" ● {} ", section.label())
-        } else {
-            format!(" {} ", section.label())
-        };
-        let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
-        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
-        let active = *section == active_section;
+    for slot in slots {
+        let x = inner.x.saturating_add(slot.x);
+        let width = display_width(&slot.text).min(right.saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        let rect = Rect::new(x, y, width, 1);
+        let active = slot.section == active_section;
         let style = if active {
             Style::default()
                 .fg(contrast(palette))
                 .bg(palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
+            muted
         };
         buffer.set_style(rect, style);
-        put_text(buffer, rect.x, rect.y, rect.width, &label, style);
-        if badge && !active {
-            put_text(
-                buffer,
-                rect.x.saturating_add(1),
-                rect.y,
-                rect.width.saturating_sub(1).min(2),
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD),
-            );
+        put_text(buffer, rect.x, rect.y, rect.width, &slot.text, style);
+        if !active {
+            if let Some(offset) = slot.text.find('●') {
+                put_text(
+                    buffer,
+                    rect.x.saturating_add(offset as u16),
+                    rect.y,
+                    1,
+                    "●",
+                    Style::default()
+                        .fg(palette.accent)
+                        .bg(palette.panel_bg)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
         }
-        tab_hits.push((rect, *section));
-        tab_x = tab_x.saturating_add(width.saturating_add(1));
-        if tab_x >= inner.right() {
-            break;
-        }
+        tab_hits.push((rect, slot.section));
     }
     put_text(
         buffer,

@@ -51,8 +51,10 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
-            ClientSettingsSection::Integrations => 0,
-            ClientSettingsSection::Remotes => 0,
+            ClientSettingsSection::Integrations
+            | ClientSettingsSection::Remotes
+            | ClientSettingsSection::Images
+            | ClientSettingsSection::Account => 0,
         }
     }
 
@@ -61,9 +63,9 @@ impl ClientShellState {
         section: ClientSettingsSection,
         outcome: &mut ClientShellInput,
     ) {
-        if section == ClientSettingsSection::Remotes {
+        if let Some(tab) = section.remotes_tab() {
             self.cancel_settings_overlay();
-            self.open_locations();
+            self.open_locations_on(tab);
             outcome.repaint = true;
             return;
         }
@@ -87,13 +89,16 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
-    /// Leaves the remotes dialog (the Remotes tab) for another settings tab.
+    /// Switches tabs from the remotes view (the remotes, images and account tabs): to
+    /// another of them within the view, else to the settings tab.
     pub(super) fn switch_from_remotes_tab(
         &mut self,
         section: ClientSettingsSection,
         outcome: &mut ClientShellInput,
     ) {
-        if section == ClientSettingsSection::Remotes {
+        outcome.repaint = true;
+        if let Some(tab) = section.remotes_tab() {
+            self.switch_remotes_tab(tab);
             return;
         }
         self.close_location();
@@ -101,28 +106,26 @@ impl ClientShellState {
         self.select_settings_section(section, outcome);
     }
 
-    /// Moves to the neighbouring settings tab from the remotes dialog.
+    /// Moves to the neighbouring settings tab from the remotes view.
     pub(super) fn move_from_remotes_tab(&mut self, delta: isize, outcome: &mut ClientShellInput) {
-        let all = ClientSettingsSection::ALL;
-        let current = all
-            .iter()
-            .position(|section| *section == ClientSettingsSection::Remotes)
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(all.len() as isize) as usize;
-        self.switch_from_remotes_tab(all[next], outcome);
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_ref() else {
+            return;
+        };
+        let next = dialog.view.tab.section().step(delta);
+        self.switch_from_remotes_tab(next, outcome);
     }
 
     fn move_settings_section(&mut self, delta: isize, outcome: &mut ClientShellInput) {
         let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_ref() else {
             return;
         };
-        let current = ClientSettingsSection::ALL
-            .iter()
-            .position(|section| *section == settings.section)
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(ClientSettingsSection::ALL.len() as isize)
-            as usize;
-        self.select_settings_section(ClientSettingsSection::ALL[next], outcome);
+        let mut next = settings.section.step(delta);
+        // While a remote operation started there still runs, the remotes view cannot
+        // open; cycling passes over its tabs instead of closing settings.
+        while next.remotes_tab().is_some() && !self.remotes_view_can_open() {
+            next = next.step(delta);
+        }
+        self.select_settings_section(next, outcome);
     }
 
     fn settings_choice_count(&self) -> usize {
@@ -132,7 +135,9 @@ impl ClientShellState {
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
-                ClientSettingsSection::Remotes => 1,
+                ClientSettingsSection::Remotes
+                | ClientSettingsSection::Images
+                | ClientSettingsSection::Account => 1,
             },
             _ => 0,
         }
@@ -256,9 +261,11 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
-            ClientSettingsSection::Remotes => {
+            ClientSettingsSection::Remotes
+            | ClientSettingsSection::Images
+            | ClientSettingsSection::Account => {
                 self.cancel_settings_overlay();
-                self.open_locations();
+                self.open_locations_on(section.remotes_tab().unwrap_or_default());
             }
         }
     }

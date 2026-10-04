@@ -383,14 +383,17 @@ pub(super) struct ClientGlobalMenuOverlay {
     pub(super) highlighted: usize,
 }
 
+/// The settings tabs. TUI presentation state only: never persisted or sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientSettingsSection {
-    Remotes,
     Theme,
     Indicators,
     Sound,
     Toast,
     Integrations,
+    Remotes,
+    Images,
+    Account,
 }
 
 impl ClientSettingsSection {
@@ -401,17 +404,41 @@ impl ClientSettingsSection {
         Self::Toast,
         Self::Integrations,
         Self::Remotes,
+        Self::Images,
+        Self::Account,
     ];
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Remotes => "remotes",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::Integrations => "integrations",
+            Self::Remotes => "remotes",
+            Self::Images => "images",
+            Self::Account => "account",
         }
+    }
+
+    /// The tabs shown by the remotes view (Settings → remotes, images, account).
+    pub(super) fn remotes_tab(self) -> Option<super::locations::view::RemotesTab> {
+        use super::locations::view::RemotesTab;
+        match self {
+            Self::Remotes => Some(RemotesTab::Remotes),
+            Self::Images => Some(RemotesTab::Images),
+            Self::Account => Some(RemotesTab::Account),
+            _ => None,
+        }
+    }
+
+    /// The neighbouring tab, wrapping around.
+    pub(super) fn step(self, delta: isize) -> Self {
+        let current = Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0);
+        Self::ALL[(current as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize]
     }
 }
 

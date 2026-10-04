@@ -30,8 +30,12 @@ pub(super) fn render_lifecycle_banner(
     if area.is_empty() || status == ClientEndpointStatus::Online {
         return Rect::default();
     }
-    let (symbol, state, color) = endpoint_status_presentation(status, palette);
-    let text = format!("{symbol} {label} · {state}");
+    let (mark, state, color) = endpoint_status_presentation(status, palette);
+    let text = if mark == "!" {
+        format!("! {label} · {state}")
+    } else {
+        format!("{label} · {state}")
+    };
     let width = u16::try_from(unicode_width::UnicodeWidthStr::width(text.as_str()) + 2)
         .unwrap_or(u16::MAX)
         .min(area.width);

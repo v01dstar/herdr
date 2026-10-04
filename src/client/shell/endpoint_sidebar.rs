@@ -72,18 +72,26 @@ pub(super) fn render_collapsed(
             if active && collapsed {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
             }
-            let label = if endpoint.endpoint_id.is_local() {
-                "L".to_owned()
-            } else {
-                (index + 1).to_string()
-            };
             let marker = if collapsed { "▸" } else { "▾" };
+            let label_width = rect.width.saturating_sub(1);
+            let label = if endpoint.endpoint_id.is_local() {
+                format!("{marker}L")
+            } else {
+                // The remote icon when it fits next to the number.
+                let number = (index + 1).to_string();
+                let with_icon = format!("{marker}{}{number}", super::endpoints::REMOTE_ICON);
+                if display_width(&with_icon) <= label_width {
+                    with_icon
+                } else {
+                    format!("{marker}{number}")
+                }
+            };
             put_text(
                 buffer,
                 rect.x,
                 rect.y,
-                rect.width.saturating_sub(1),
-                &format!("{marker}{label}"),
+                label_width,
+                &label,
                 Style::default().fg(if endpoint.status == ClientEndpointStatus::Online {
                     palette.text
                 } else {
@@ -92,7 +100,11 @@ pub(super) fn render_collapsed(
             );
             let mut status_badge = Rect::default();
             if !endpoint.endpoint_id.is_local() {
-                let (glyph, _, color) = endpoint_status_presentation(endpoint.status, palette);
+                let (glyph, _, color) = if state.machine_diagnostics.required_for(endpoint) {
+                    ("!", "", palette.red)
+                } else {
+                    endpoint_status_presentation(endpoint.status, palette)
+                };
                 let width = display_width(glyph).min(rect.width);
                 status_badge = Rect::new(rect.right().saturating_sub(width), rect.y, width, 1);
                 put_right_text(
@@ -591,30 +603,26 @@ fn render_endpoint_row(
     if highlighted {
         buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
     }
-    let (glyph, state, color) = endpoint_status_presentation(endpoint.status, palette);
-    let state = if endpoint.status == ClientEndpointStatus::Online {
-        ""
-    } else {
-        state
-    };
+    // Online needs no word; the others say what is going on (no dots: those are agent
+    // states).
+    let (_, state, color) = endpoint_status_presentation(endpoint.status, palette);
     let signal = if auth.required_for(endpoint) {
         "! auth".to_owned()
     } else if endpoint.status == ClientEndpointStatus::Attention {
         "! error".to_owned()
-    } else if endpoint.endpoint_id.is_local() {
+    } else if endpoint.endpoint_id.is_local() || endpoint.status == ClientEndpointStatus::Online {
         String::new()
-    } else if state.is_empty() {
-        glyph.to_owned()
     } else {
-        format!("{glyph} {state}")
+        state.to_owned()
     };
     let signal_width = display_width(&signal).min(rect.width);
+    let title = super::endpoints::endpoint_title(&endpoint.endpoint_id, &endpoint.label);
     put_text(
         buffer,
         rect.x,
         rect.y,
         rect.width.saturating_sub(signal_width.saturating_add(1)),
-        &format!(" {marker} {}", endpoint.label),
+        &format!(" {marker} {title}"),
         Style::default()
             .fg(
                 if matches!(endpoint.status, ClientEndpointStatus::Disabled) {

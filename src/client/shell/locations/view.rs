@@ -1,16 +1,17 @@
-//! Settings → Remotes as a two-pane view with three sub-views: Remotes (a list of
-//! remotes and the actions of the selected one), Images and Account. Everything here is
-//! TUI presentation state: selection, focus and the last fetched images and usage.
-//! Forms and confirmations stay modal dialogs of the same `LocationDialog`; when one
-//! closes, the view (sub-view, selection, focus) is what it was before.
+//! The remotes, images and account tabs of Settings: a list of remotes and the actions
+//! of the selected one, a list of images and their actions, and the hangar account.
+//! Everything here is TUI presentation state: tab, selection, focus and the last fetched
+//! images and usage. Forms and confirmations stay modal dialogs of the same
+//! `LocationDialog`; when one closes, the view (tab, selection, focus) is what it was
+//! before.
 //!
-//! Images and usage are fetched on worker threads when their sub-view opens; results
+//! Images and usage are fetched on worker threads when their tab opens; results
 //! carry the dialog epoch so a late result never overrides a newer dialog.
 use super::*;
 use crate::client::locations::hangar::{MachineDetails, MachineSource};
 use crate::hangar::api::{HangarError, Image, Usage};
 
-/// The sub-views of Settings → Remotes.
+/// The settings tabs this view shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::client::shell) enum RemotesTab {
     #[default]
@@ -20,19 +21,16 @@ pub(in crate::client::shell) enum RemotesTab {
 }
 
 impl RemotesTab {
-    pub(in crate::client::shell) const ALL: [Self; 3] =
-        [Self::Remotes, Self::Images, Self::Account];
-
-    pub(in crate::client::shell) fn label(self) -> &'static str {
+    pub(in crate::client::shell) fn section(self) -> ClientSettingsSection {
         match self {
-            Self::Remotes => "Remotes",
-            Self::Images => "Images",
-            Self::Account => "Account",
+            Self::Remotes => ClientSettingsSection::Remotes,
+            Self::Images => ClientSettingsSection::Images,
+            Self::Account => ClientSettingsSection::Account,
         }
     }
 }
 
-/// Which pane of the Remotes and Images sub-views takes ↑/↓ and ↵.
+/// Which pane of the remotes and images tabs takes ↑/↓ and ↵.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::client::shell) enum Focus {
     #[default]
@@ -45,7 +43,6 @@ pub(in crate::client::shell) enum RemoteAction {
     Start,
     Suspend,
     Stop,
-    Status,
     Test,
     Edit,
     Default,
@@ -55,23 +52,13 @@ pub(in crate::client::shell) enum RemoteAction {
     Remove,
 }
 
+/// Actions are listed in groups, separated by a blank line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::client::shell) enum ActionGroup {
-    Machine,
+    Lifecycle,
     Connection,
     Copy,
     Remove,
-}
-
-impl ActionGroup {
-    pub(in crate::client::shell) fn title(self) -> &'static str {
-        match self {
-            Self::Machine => "Machine",
-            Self::Connection => "Connection",
-            Self::Copy => "Copy",
-            Self::Remove => "Remove",
-        }
-    }
 }
 
 /// One action of the selected remote. A `reason` means it applies to this kind of
@@ -109,7 +96,7 @@ pub(in crate::client::shell) struct RemoteFacts {
     pub snapshots: Option<bool>,
 }
 
-const SIGN_IN_FIRST: &str = "Sign in on the Account tab first";
+const SIGN_IN_FIRST: &str = "Sign in on the account tab first";
 const OFFLINE: &str = "hangar is unreachable; showing the last synced state";
 
 fn transitional(state: MachineState) -> Option<&'static str> {
@@ -125,7 +112,8 @@ fn transitional(state: MachineState) -> Option<&'static str> {
     })
 }
 
-/// The actions of a remote in display order, grouped. Pure; table-tested.
+/// The actions of a remote in display order: lifecycle, connection, copy, remove.
+/// Pure; table-tested.
 pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<ActionEntry> {
     let entry = |action, group, label, reason| ActionEntry {
         action,
@@ -152,18 +140,18 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
                 "Test connection",
                 (!facts.enabled).then_some("Disabled; Start session enables it"),
             ),
-            entry(
-                RemoteAction::Start,
-                ActionGroup::Connection,
-                "Start session",
-                None,
-            ),
             entry(RemoteAction::Edit, ActionGroup::Connection, "Edit…", None),
             entry(
                 RemoteAction::Default,
                 ActionGroup::Connection,
                 "Use as default",
                 default_reason,
+            ),
+            entry(
+                RemoteAction::Start,
+                ActionGroup::Connection,
+                "Start session",
+                None,
             ),
             entry(
                 RemoteAction::Remove,
@@ -204,7 +192,7 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
             if start || resume {
                 lifecycle.push(entry(
                     RemoteAction::Start,
-                    ActionGroup::Machine,
+                    ActionGroup::Lifecycle,
                     if resume { "Resume" } else { "Start" },
                     server(waiting),
                 ));
@@ -212,7 +200,7 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
             if suspend {
                 lifecycle.push(entry(
                     RemoteAction::Suspend,
-                    ActionGroup::Machine,
+                    ActionGroup::Lifecycle,
                     "Suspend…",
                     server(waiting),
                 ));
@@ -220,7 +208,7 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
             if stop {
                 lifecycle.push(entry(
                     RemoteAction::Stop,
-                    ActionGroup::Machine,
+                    ActionGroup::Lifecycle,
                     "Stop…",
                     server(waiting),
                 ));
@@ -245,12 +233,6 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
             lifecycle
                 .into_iter()
                 .chain([
-                    entry(
-                        RemoteAction::Status,
-                        ActionGroup::Machine,
-                        "Machine status",
-                        server(None),
-                    ),
                     entry(
                         RemoteAction::Test,
                         ActionGroup::Connection,
@@ -347,7 +329,6 @@ impl AccountAction {
 /// Where a click in the view lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::client::shell) enum RemotesHit {
-    Tab(RemotesTab),
     Row(ListRow),
     Action(RemoteAction),
     /// Index into the listed images.
@@ -363,7 +344,7 @@ pub(in crate::client::shell) struct ImageList {
     pub images: Vec<Image>,
 }
 
-/// Presentation state of Settings → Remotes; it survives the dialogs opened from it.
+/// Presentation state of the remotes, images and account tabs; it survives the dialogs opened from it.
 #[derive(Clone, Debug, Default)]
 pub(in crate::client::shell) struct RemotesView {
     pub tab: RemotesTab,
@@ -632,7 +613,7 @@ impl LocationDialog {
     }
 }
 
-/// How a state glyph is colored.
+/// How a state word is colored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::client::shell) enum Tone {
     Good,
@@ -642,49 +623,44 @@ pub(in crate::client::shell) enum Tone {
 }
 
 impl LocationDialog {
-    /// The state glyph of a list row: ● running, ◐ suspended, ○ stopped, ! error,
-    /// … transitional, ? unknown or offline.
-    pub(in crate::client::shell) fn glyph(&self, row: ListRow) -> (&'static str, Tone) {
-        let index = match row {
-            ListRow::Local => return ("●", Tone::Good),
-            ListRow::Add => return ("+", Tone::Muted),
-            ListRow::Remote(index) => index,
+    /// The state word at the right of a list row (no dots or circles: those are agent
+    /// states). Local and Add remote have none.
+    pub(in crate::client::shell) fn list_state(&self, row: ListRow) -> Option<(String, Tone)> {
+        let ListRow::Remote(index) = row else {
+            return None;
         };
         let profile = &self.profiles[index];
         if self.binding_of(index).is_none() {
-            return if self.view.connected.contains(&profile.id) {
-                ("●", Tone::Good)
-            } else if !profile.enabled {
-                ("○", Tone::Muted)
+            let text = self.state_text(index);
+            let tone = if text == "connected" {
+                Tone::Good
             } else {
-                ("?", Tone::Muted)
+                Tone::Muted
             };
+            return Some((text.into(), tone));
         }
-        if self.sync_notes.contains_key(&profile.id) {
-            return ("?", Tone::Muted);
+        if let Some(note) = self.sync_notes.get(&profile.id) {
+            return Some(((*note).into(), Tone::Muted));
         }
-        match self.state_of(index) {
-            Some(MachineState::Running) => ("●", Tone::Good),
-            Some(MachineState::Suspended) => ("◐", Tone::Warn),
-            Some(MachineState::Stopped) => ("○", Tone::Muted),
-            Some(MachineState::Error) => ("!", Tone::Bad),
-            Some(state) if transitional(state).is_some() => ("…", Tone::Warn),
-            _ => ("?", Tone::Muted),
-        }
+        let text = self.state_text(index);
+        Some(match self.state_of(index) {
+            _ if text == "stopping" => ("stopping…".into(), Tone::Warn),
+            Some(MachineState::Running) => (text.into(), Tone::Good),
+            Some(MachineState::Error) => (text.into(), Tone::Bad),
+            Some(state) if transitional(state).is_some() && state != MachineState::Deleted => {
+                (format!("{text}…"), Tone::Warn)
+            }
+            Some(MachineState::Unknown) | None => ("unknown".into(), Tone::Muted),
+            Some(_) => (text.into(), Tone::Muted),
+        })
     }
 
-    /// Short notes after a row's name: offline, hidden, disabled, default.
+    /// Short notes before a row's state: hidden, default.
     pub(in crate::client::shell) fn suffix(&self, row: ListRow) -> String {
         let mut notes = Vec::new();
         if let ListRow::Remote(index) = row {
-            let profile = &self.profiles[index];
-            if let Some(note) = self.sync_notes.get(&profile.id) {
-                notes.push(*note);
-            }
-            if self.hidden.contains(&profile.id) {
+            if self.hidden.contains(&self.profiles[index].id) {
                 notes.push("hidden");
-            } else if self.binding_of(index).is_none() && !profile.enabled {
-                notes.push("disabled");
             }
         }
         if self.is_default(row) {
@@ -702,7 +678,7 @@ impl LocationDialog {
             } else if !profile.enabled {
                 "disabled"
             } else {
-                "not connected"
+                "offline"
             };
         }
         match self.state_of(index) {
@@ -740,7 +716,7 @@ pub(in crate::client::shell) fn bytes(value: u64) -> String {
 
 fn images_error(error: &HangarError) -> String {
     if error.needs_sign_in() {
-        "Sign in on the Account tab to list your images.".into()
+        "Sign in on the account tab to list your images.".into()
     } else {
         format!("Could not list images: {error}")
     }
@@ -803,7 +779,8 @@ impl ClientShellState {
         }
     }
 
-    /// Switches the sub-view and fetches what it shows.
+    /// Switches between the remotes, images and account tabs and fetches what the tab
+    /// shows.
     pub(in crate::client::shell) fn switch_remotes_tab(&mut self, tab: RemotesTab) {
         let Some(dialog) = self.remotes_dialog_mut() else {
             return;
@@ -848,7 +825,7 @@ impl ClientShellState {
     }
 
     /// Applies finished image and usage fetches of the current dialog; results of an
-    /// older dialog are dropped, and a sub-view whose data is missing asks again.
+    /// older dialog are dropped, and a tab whose data is missing asks again.
     pub(in crate::client::shell) fn tick_remotes_view(&mut self, outcome: &mut ClientShellInput) {
         let epoch = self.locations.epoch;
         if let Some((job_epoch, result)) = take_result(&mut self.locations.images) {
@@ -892,7 +869,10 @@ impl ClientShellState {
         }
     }
 
-    /// Keys of Settings → Remotes. ←/→ always move between settings tabs.
+    /// Keys of the remotes, images and account tabs. Like on every settings tab, ←/→,
+    /// h/l and tab/shift-tab move between tabs (also while busy); ↑/↓ (k/j) move in the
+    /// focused pane, ↵ moves from the list to the actions and runs an action, esc goes
+    /// back to the list and then closes Settings.
     pub(in crate::client::shell) fn route_remotes_key(
         &mut self,
         key: &crate::input::TerminalKey,
@@ -905,7 +885,9 @@ impl ClientShellState {
         let busy = dialog.busy;
         let tab = dialog.view.tab;
         let focus = dialog.view.focus;
-        match key.code {
+        let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+        let plain = modifiers.is_empty();
+        match code {
             KeyCode::Esc => {
                 if !busy && focus == Focus::Actions && tab != RemotesTab::Account {
                     dialog.view.focus = Focus::List;
@@ -914,26 +896,28 @@ impl ClientShellState {
                 }
                 return true;
             }
-            KeyCode::Left | KeyCode::Right => {
-                self.move_from_remotes_tab(if key.code == KeyCode::Left { -1 } else { 1 }, outcome);
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') if plain => {
+                self.move_from_remotes_tab(1, outcome);
                 return true;
             }
-            _ if busy => return true,
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h')
+                if modifiers
+                    .difference(crossterm::event::KeyModifiers::SHIFT)
+                    .is_empty() =>
+            {
+                self.move_from_remotes_tab(-1, outcome);
+                return true;
+            }
+            _ if busy || !plain => return true,
             _ => {}
         }
-        match key.code {
-            KeyCode::Char(digit @ '1'..='3') => {
-                let index = digit as usize - '1' as usize;
-                self.switch_remotes_tab(RemotesTab::ALL[index]);
-            }
-            KeyCode::Tab | KeyCode::BackTab if tab != RemotesTab::Account => {
-                dialog.view.focus = match focus {
-                    Focus::List if can_focus_actions(dialog) => Focus::Actions,
-                    _ => Focus::List,
+        match code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('j') => {
+                let delta = if matches!(code, KeyCode::Up | KeyCode::Char('k')) {
+                    -1
+                } else {
+                    1
                 };
-            }
-            KeyCode::Up | KeyCode::Down => {
-                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
                 match (tab, focus) {
                     (RemotesTab::Remotes, Focus::List) => dialog.move_list(delta),
                     (RemotesTab::Remotes, Focus::Actions) => dialog.move_action(delta),
@@ -1013,7 +997,6 @@ impl ClientShellState {
             return true;
         }
         match hit {
-            RemotesHit::Tab(tab) => self.switch_remotes_tab(tab),
             RemotesHit::Row(row) => {
                 dialog.select_row(row);
                 dialog.view.focus = Focus::List;

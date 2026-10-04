@@ -4,6 +4,8 @@ mod location_overlay;
 mod remotes_overlay;
 mod settings_overlay;
 pub(in crate::client::shell) use location_overlay::render_locations;
+#[cfg(test)]
+pub(in crate::client::shell) use settings_overlay::layout_settings_tabs;
 pub(in crate::client::shell) use settings_overlay::render_settings_overlay;
 mod worktree_overlays;
 
@@ -884,7 +886,13 @@ fn render_navigator_overlay(
         let current = if r.current { "◆ " } else { "" };
         let status = r.status.map(status_dot).unwrap_or_default();
         let status_separator = if status.is_empty() { "" } else { " " };
-        let label = format!("{indent}{current}{status}{status_separator}{}", r.label);
+        let title = match &r.target {
+            ClientNavigatorTarget::Machine { endpoint_id } => {
+                super::endpoints::endpoint_title(endpoint_id, &r.label)
+            }
+            _ => r.label.clone(),
+        };
+        let label = format!("{indent}{current}{status}{status_separator}{title}");
         let st = if r.status.is_none() {
             st.add_modifier(Modifier::BOLD)
         } else {
@@ -977,11 +985,11 @@ fn render_navigator_overlay(
             _ => None,
         };
         if let Some(status) = machine_status {
-            let (glyph, state, color) = endpoint_status_presentation(status, p);
-            let signal = if status == ClientEndpointStatus::Online {
-                glyph.to_owned()
-            } else {
-                format!("{glyph} {state}")
+            let (mark, state, color) = endpoint_status_presentation(status, p);
+            let signal = match status {
+                ClientEndpointStatus::Online => String::new(),
+                _ if mark == "!" => format!("! {state}"),
+                _ => state.to_owned(),
             };
             let signal_style = if ix == selected {
                 st

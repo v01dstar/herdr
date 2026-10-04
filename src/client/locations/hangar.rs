@@ -579,6 +579,8 @@ pub(crate) struct MachineDetails {
     pub forked_from: Option<String>,
     /// Whether its template allows images and forks; `None` when unknown.
     pub snapshots: Option<bool>,
+    /// The message of the machine's last failed operation, if any.
+    pub last_error: Option<String>,
 }
 
 impl MachineDetails {
@@ -610,34 +612,13 @@ impl MachineDetails {
                 .map(|fork| fork.machine_id.clone())
                 .filter(|id| !id.is_empty()),
             snapshots,
+            last_error: machine
+                .last_error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .filter(|message| !message.is_empty()),
         }
     }
-}
-
-pub(crate) fn describe(machine: &Machine) -> String {
-    let ready = match (machine.state, machine.runtime.ready) {
-        (MachineState::Running, true) => ", ready",
-        (MachineState::Running, false) => ", not ready yet",
-        _ => "",
-    };
-    let error = machine
-        .last_error
-        .as_ref()
-        .filter(|error| !error.message.is_empty())
-        .map(|error| format!(" (last error: {})", error.message))
-        .unwrap_or_default();
-    let origin = match (&machine.image, &machine.forked_from) {
-        (Some(image), _) if !image.id.is_empty() => format!(", from image {}", image.id),
-        (_, Some(fork)) if !fork.machine_id.is_empty() => {
-            format!(", forked from {}", fork.machine_id)
-        }
-        _ => String::new(),
-    };
-    format!(
-        "{}: {}{ready}{origin}{error}",
-        machine.name,
-        machine.state.as_str()
-    )
 }
 
 fn hangar_client(server: &str) -> Result<Client, HangarError> {
@@ -779,12 +760,6 @@ pub(crate) fn delete_machine(
         &binding.machine_id,
         progress,
     )
-}
-
-pub(crate) fn machine_status(binding: &HangarBinding) -> Result<String, HangarError> {
-    Ok(describe(
-        &hangar_client(&binding.server)?.machine(&binding.machine_id)?,
-    ))
 }
 
 pub(crate) fn create_machine(

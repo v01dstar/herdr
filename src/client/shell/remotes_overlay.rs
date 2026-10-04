@@ -1,12 +1,17 @@
-//! Settings → Remotes: the settings frame and tabs, a sub-view switcher, then two panes
-//! (a list and the selected item's details and actions). Pure: reads the dialog only.
+//! The remotes, images and account tabs of Settings: the settings frame and tabs, then
+//! two panes (a list and the selected item's details and actions) or the account. Pure:
+//! reads the dialog only.
 use super::*;
 use crate::client::shell::locations::account::{badge, SHARED_NOTE};
 use crate::client::shell::locations::view::{
-    bytes, date, ActionGroup, Focus, ImageAction, ListRow, RemotesHit, RemotesTab, Tone,
+    bytes, date, Focus, ImageAction, ListRow, RemotesHit, RemotesTab, Tone,
 };
 use crate::client::shell::locations::LocationDialog;
 use ratatui::style::Color;
+
+/// Taller than the other settings tabs (like Integrations with a long list), so a
+/// hangar machine's header and all its actions fit without scrolling.
+const REMOTES_HEIGHT: u16 = super::settings_overlay::SETTINGS_HEIGHT + 3;
 
 struct Styles {
     normal: Style,
@@ -66,13 +71,6 @@ fn wrap(text: &str, width: u16) -> Vec<String> {
     lines
 }
 
-/// Puts `text` from `x` up to `right`; returns where it ended.
-fn put_until(buffer: &mut Buffer, x: u16, y: u16, right: u16, text: &str, style: Style) -> u16 {
-    let width = display_width(text).min(right.saturating_sub(x));
-    put_text(buffer, x, y, width, text, style);
-    x.saturating_add(width)
-}
-
 /// A row with `left` and, right-aligned, `right` (which wins when space is short).
 fn put_split(
     buffer: &mut Buffer,
@@ -102,7 +100,7 @@ pub(in crate::client::shell) fn render_remotes(
     dialog: &LocationDialog,
     palette: &Palette,
 ) -> Option<OverlayRender> {
-    let area = popup(buffer.area, 76, super::settings_overlay::SETTINGS_HEIGHT)?;
+    let area = popup(buffer.area, 76, REMOTES_HEIGHT)?;
     let inner = panel(buffer, area, palette.accent, palette.panel_bg)?;
     if inner.width < 24 || inner.height < 8 {
         return None;
@@ -119,44 +117,23 @@ pub(in crate::client::shell) fn render_remotes(
     let settings_tabs = super::settings_overlay::render_settings_tabs(
         buffer,
         inner,
-        ClientSettingsSection::Remotes,
+        dialog.view.tab.section(),
         false,
         palette,
     );
     let mut hits = Vec::new();
 
-    // The sub-view switcher, and who is signed in at its right.
-    let switcher_y = inner.y + 3;
+    // Who is signed in to hangar, at the right of the title.
     let login = badge(dialog.account.as_ref());
-    let login_width = display_width(&login).min(inner.width / 3);
+    let login_width = display_width(&login).min(inner.width.saturating_sub(11));
     put_text(
         buffer,
         inner.right().saturating_sub(login_width + 1),
-        switcher_y,
+        inner.y,
         login_width,
         &login,
         styles.dim,
     );
-    let mut x = inner.x + 1;
-    for (index, tab) in RemotesTab::ALL.iter().enumerate() {
-        if index > 0 {
-            x = put_until(buffer, x, switcher_y, inner.right(), " · ", styles.faint);
-        }
-        let style = if *tab == dialog.view.tab {
-            styles
-                .bold
-                .fg(palette.accent)
-                .add_modifier(Modifier::UNDERLINED)
-        } else {
-            styles.normal.fg(palette.overlay1)
-        };
-        let start = x;
-        x = put_until(buffer, x, switcher_y, inner.right(), tab.label(), style);
-        hits.push((
-            Rect::new(start, switcher_y, x - start, 1),
-            RemotesHit::Tab(*tab),
-        ));
-    }
 
     // Bottom: the close button, a key hint and a message strip.
     let bottom = inner.bottom();
@@ -169,9 +146,9 @@ pub(in crate::client::shell) fn render_remotes(
         styles.bold.bg(palette.surface0),
     );
     let hint = match (dialog.view.tab, dialog.view.focus) {
-        (RemotesTab::Account, _) => " ↑↓ select  ↵ run  1-3 view  ←→ settings tab  esc close",
-        (_, Focus::List) => " ↑↓ select  ↵/tab actions  1-3 view  ←→ settings tab  esc close",
-        (_, Focus::Actions) => " ↑↓ select  ↵ run  tab/esc list  1-3 view  ←→ settings tab",
+        (RemotesTab::Account, _) => " ↑↓ select  ↵ run  ←→ tab  esc close",
+        (_, Focus::List) => " ↑↓ select  ↵ actions  ←→ tab  esc close",
+        (_, Focus::Actions) => " ↑↓ select  ↵ run  esc back to list  ←→ tab",
     };
     put_text(
         buffer,
@@ -303,47 +280,68 @@ fn render_remotes_tab(
         .enumerate()
     {
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
+        let highlighted = *row == selected_row && list_focus;
         let style = match (*row == selected_row, list_focus) {
             (true, true) => styles.highlight,
             (true, false) => styles.inactive,
             _ => styles.normal,
         };
         buffer.set_style(rect, style);
-        let name = match row {
-            ListRow::Local => "Local".to_owned(),
-            ListRow::Remote(index) => dialog.profiles[*index].label.clone(),
-            ListRow::Add => "Add remote".to_owned(),
-        };
-        let (glyph, glyph_tone) = dialog.glyph(*row);
-        let glyph_style = if style == styles.highlight {
-            style
-        } else if *row == ListRow::Add {
-            style.fg(palette.accent)
-        } else {
-            style.fg(tone(palette, glyph_tone))
+        let colored = |color: Color| if highlighted { style } else { style.fg(color) };
+        let (name, icon) = match row {
+            ListRow::Local => ("Local".to_owned(), ""),
+            ListRow::Remote(index) => (
+                dialog.profiles[*index].label.clone(),
+                super::endpoints::REMOTE_ICON,
+            ),
+            ListRow::Add => ("Add remote".to_owned(), "+"),
         };
         if *row == selected_row {
             put_text(buffer, rect.x, rect.y, 1, "▸", style);
         }
-        put_text(buffer, rect.x + 2, rect.y, 1, glyph, glyph_style);
-        let text = Rect::new(rect.x + 4, rect.y, rect.width.saturating_sub(5), 1);
-        let name_style = if *row == ListRow::Add && style != styles.highlight {
-            style.fg(palette.accent)
+        let icon_style = if *row == ListRow::Add {
+            colored(palette.accent)
         } else {
             style
         };
-        let suffix_style = if style == styles.highlight {
-            style
+        put_text(buffer, rect.x + 2, rect.y, 1, icon, icon_style);
+        let text = Rect::new(rect.x + 4, rect.y, rect.width.saturating_sub(5), 1);
+        // Right: notes, then the state word in its colour; the name gets the rest.
+        let notes = dialog.suffix(*row);
+        let state = dialog.list_state(*row);
+        let state_width = state
+            .as_ref()
+            .map_or(0, |(word, _)| display_width(word))
+            .min(text.width);
+        if let Some((word, word_tone)) = &state {
+            put_text(
+                buffer,
+                text.right().saturating_sub(state_width),
+                text.y,
+                state_width,
+                word,
+                colored(tone(palette, *word_tone)),
+            );
+        }
+        let rest = Rect::new(
+            text.x,
+            text.y,
+            text.width
+                .saturating_sub(state_width + u16::from(state_width > 0)),
+            1,
+        );
+        let name_style = if *row == ListRow::Add {
+            colored(palette.accent)
         } else {
-            style.fg(palette.overlay1)
+            style
         };
         put_split(
             buffer,
-            text,
+            rest,
             &name,
             name_style,
-            &dialog.suffix(*row),
-            suffix_style,
+            &notes,
+            colored(palette.overlay1),
         );
         hits.push((rect, RemotesHit::Row(*row)));
     }
@@ -354,37 +352,30 @@ fn render_remotes_tab(
 enum Line {
     Text(String, Style),
     Blank,
-    /// Two columns of group headings or actions (indices into the actions).
-    Grid([Option<Cell>; 2]),
+    /// Index into the actions.
+    Action(usize),
     Reason(String),
 }
 
-#[derive(Clone, Copy)]
-enum Cell {
-    Heading(ActionGroup),
-    Action(usize),
-}
-
-fn remote_info(dialog: &LocationDialog, row: ListRow) -> (String, Vec<String>) {
+/// The details header (`name · hangar|ssh · state`) and the line(s) below it.
+fn remote_info(dialog: &LocationDialog, row: ListRow) -> (String, Option<String>) {
     match row {
         ListRow::Local => (
             "Local · this computer".into(),
-            if dialog.is_default(row) {
-                vec!["New workspaces open here by default.".into()]
-            } else {
-                Vec::new()
-            },
+            dialog
+                .is_default(row)
+                .then(|| "New workspaces open here by default.".into()),
         ),
         ListRow::Add => (
             "Add remote".into(),
-            vec!["Create a hangar machine, from the herdr template or one of your images, or add an SSH remote. Press ↵ or click to start.".into()],
+            Some("Create a hangar machine, from the herdr template or one of your images, or add an SSH remote. Press ↵ or click to start.".into()),
         ),
         ListRow::Remote(index) => {
             let profile = &dialog.profiles[index];
             let state = dialog.state_text(index);
-            let mut info = Vec::new();
-            let Some(binding) = dialog.binding_of(index) else {
-                info.push(format!("{} · session {}", profile.target, profile.session));
+            let mut parts = Vec::new();
+            if dialog.binding_of(index).is_none() {
+                parts.push(format!("{} · session {}", profile.target, profile.session));
                 if let Some(cwd) = dialog
                     .prefs
                     .remotes
@@ -392,19 +383,16 @@ fn remote_info(dialog: &LocationDialog, row: ListRow) -> (String, Vec<String>) {
                     .map(|options| options.cwd.as_str())
                     .filter(|cwd| !cwd.is_empty())
                 {
-                    info.push(format!("directory {cwd}"));
+                    parts.push(format!("directory {cwd}"));
                 }
-                return (format!("{} · ssh · {state}", profile.label), info);
-            };
-            let host = binding
-                .server
-                .split_once("://")
-                .map_or(binding.server.as_str(), |(_, host)| host)
-                .trim_end_matches('/');
+                return (
+                    format!("{} · ssh · {state}", profile.label),
+                    Some(parts.join(" · ")),
+                );
+            }
             let details = dialog.details_of(index);
-            match details.and_then(|details| details.template.as_deref()) {
-                Some(template) => info.push(format!("{host} · {template}")),
-                None => info.push(host.to_owned()),
+            if let Some(template) = details.and_then(|details| details.template.as_deref()) {
+                parts.push(template.to_owned());
             }
             if let Some(spec) = details.and_then(|details| details.spec.as_ref()) {
                 let memory = if spec.mem_mib % 1024 == 0 {
@@ -412,32 +400,38 @@ fn remote_info(dialog: &LocationDialog, row: ListRow) -> (String, Vec<String>) {
                 } else {
                     format!("{} MiB", spec.mem_mib)
                 };
-                let mut parts = vec![format!("{} vCPU", spec.vcpus), format!("{memory} RAM")];
+                parts.push(format!("{} vCPU", spec.vcpus));
+                parts.push(format!("{memory} RAM"));
                 if let Some(root) = spec.root_disk_gib {
                     parts.push(format!("{root} GiB root"));
                 }
                 parts.push(format!("{} GiB /data", spec.persistent_disk_gib));
-                info.push(parts.join(" · "));
             }
             if let Some(source) = details.and_then(|details| details.forked_from.as_deref()) {
-                info.push(format!(
+                parts.push(format!(
                     "forked from {}",
                     dialog.machine_name(source).unwrap_or(source)
                 ));
             }
             if let Some(image) = details.and_then(|details| details.image_id.as_deref()) {
-                info.push(format!(
+                parts.push(format!(
                     "from image {}",
                     dialog.image_name(image).unwrap_or(image)
                 ));
             }
             if let Some(note) = dialog.sync_notes.get(&profile.id) {
-                info.push(format!("List {note}: showing the last synced state."));
+                parts.push(format!("{note}: last synced state"));
             }
-            if dialog.hidden.contains(&profile.id) {
-                info.push("Hidden from the sidebar and not connected.".into());
+            if let Some(error) = details
+                .and_then(|details| details.last_error.as_deref())
+                .filter(|_| dialog.state_of(index) == Some(crate::hangar::api::MachineState::Error))
+            {
+                parts.push(format!("last error: {error}"));
             }
-            (format!("{} · hangar · {state}", profile.label), info)
+            (
+                format!("{} · hangar · {state}", profile.label),
+                (!parts.is_empty()).then(|| parts.join(" · ")),
+            )
         }
     }
 }
@@ -456,79 +450,51 @@ fn render_remote_details(
     let row = dialog.selected_row();
     let (header, info) = remote_info(dialog, row);
     let mut lines = vec![Line::Text(header, styles.bold)];
-    for text in info {
-        for line in wrap(&text, area.width) {
-            lines.push(Line::Text(line, styles.dim));
-        }
+    for line in info.iter().flat_map(|text| wrap(text, area.width)) {
+        lines.push(Line::Text(line, styles.dim));
     }
     let actions = dialog.actions();
     let selected = dialog.selected_action();
     let actions_focus = dialog.view.focus == Focus::Actions && !dialog.busy;
     let mut selected_line = None;
-    if !actions.is_empty() {
-        let mut groups: Vec<(ActionGroup, Vec<usize>)> = Vec::new();
-        for (index, entry) in actions.iter().enumerate() {
-            match groups.last_mut() {
-                Some((group, members)) if *group == entry.group => members.push(index),
-                _ => groups.push((entry.group, vec![index])),
-            }
-        }
-        let columns = if area.width >= 40 { 2 } else { 1 };
-        for chunk in groups.chunks(columns) {
+    // One column; groups separated by a blank line.
+    let mut group = None;
+    for (index, entry) in actions.iter().enumerate() {
+        if group != Some(entry.group) {
             lines.push(Line::Blank);
-            let mut headings = [None, None];
-            for (column, (group, _)) in chunk.iter().enumerate() {
-                headings[column] = Some(Cell::Heading(*group));
-            }
-            lines.push(Line::Grid(headings));
-            let depth = chunk
-                .iter()
-                .map(|(_, members)| members.len())
-                .max()
-                .unwrap_or(0);
-            for depth_index in 0..depth {
-                let mut cells = [None, None];
-                let mut reason = None;
-                for (column, (_, members)) in chunk.iter().enumerate() {
-                    if let Some(index) = members.get(depth_index) {
-                        let entry = &actions[*index];
-                        if selected.as_ref() == Some(entry) {
-                            selected_line = Some(lines.len());
-                            reason = entry.reason.filter(|_| actions_focus);
-                        }
-                        cells[column] = Some(Cell::Action(*index));
-                    }
-                }
-                lines.push(Line::Grid(cells));
-                // Why the selected action is dimmed, right below it.
-                if let Some(reason) = reason {
-                    lines.push(Line::Reason(format!("↳ {reason}")));
-                }
-            }
+            group = Some(entry.group);
         }
+        if selected.as_ref() == Some(entry) {
+            selected_line = Some(lines.len());
+        }
+        lines.push(Line::Action(index));
+    }
+    // Why the selected action is dimmed, under the list.
+    if let Some(reason) = selected
+        .as_ref()
+        .and_then(|entry| entry.reason)
+        .filter(|_| actions_focus)
+    {
+        lines.push(Line::Blank);
+        selected_line = Some(lines.len());
+        lines.push(Line::Reason(format!("↳ {reason}")));
     }
     let height = usize::from(area.height);
-    // The header stays; the rest scrolls to keep the selected action and its reason in
-    // view.
+    // The header line stays; the rest scrolls to keep the selected action (and the
+    // reason under the list) in view.
     let visible: Vec<usize> = if lines.len() <= height || height < 2 {
         (0..lines.len().min(height)).collect()
     } else {
         let body = height - 1;
         let skip = match selected_line {
-            Some(line) if actions_focus => {
-                (line + 1).saturating_sub(body).min(lines.len() - 1 - body)
-            }
+            Some(line) if actions_focus => line.saturating_sub(body).min(lines.len() - 1 - body),
             _ => 0,
         };
         std::iter::once(0)
             .chain(1 + skip..1 + skip + body)
             .collect()
     };
-    let column_width = if area.width >= 40 {
-        area.width / 2
-    } else {
-        area.width
-    };
+    let action_width = area.width.min(32);
     for (offset, line) in visible.iter().map(|index| &lines[*index]).enumerate() {
         let y = area.y + offset as u16;
         match line {
@@ -542,58 +508,37 @@ fn render_remote_details(
                 text,
                 styles.normal.fg(palette.yellow),
             ),
-            Line::Grid(cells) => {
-                for (column, cell) in cells.iter().enumerate() {
-                    let rect = Rect::new(
-                        area.x + column as u16 * column_width,
-                        y,
-                        column_width.saturating_sub(1),
-                        1,
-                    );
-                    match cell {
-                        Some(Cell::Heading(group)) => put_text(
-                            buffer,
-                            rect.x,
-                            y,
-                            rect.width,
-                            group.title(),
-                            styles.dim.add_modifier(Modifier::BOLD),
-                        ),
-                        Some(Cell::Action(index)) => {
-                            let entry = &actions[*index];
-                            let is_selected = selected.as_ref() == Some(entry);
-                            let style = match (is_selected && actions_focus, entry.reason.is_some())
-                            {
-                                (true, false) => styles.highlight,
-                                (true, true) => styles.inactive.fg(palette.overlay1),
-                                (false, true) => styles.faint,
-                                (false, false) => styles.normal,
-                            };
-                            buffer.set_style(rect, style);
-                            let marker = if is_selected && actions_focus {
-                                "▸"
-                            } else {
-                                " "
-                            };
-                            put_text(
-                                buffer,
-                                rect.x,
-                                y,
-                                rect.width,
-                                &format!("{marker} {}", entry.label),
-                                style,
-                            );
-                            hits.push((rect, RemotesHit::Action(entry.action)));
-                        }
-                        None => {}
-                    }
-                }
+            Line::Action(index) => {
+                let entry = &actions[*index];
+                let rect = Rect::new(area.x, y, action_width, 1);
+                let is_selected = selected.as_ref() == Some(entry);
+                let style = match (is_selected && actions_focus, entry.reason.is_some()) {
+                    (true, false) => styles.highlight,
+                    (true, true) => styles.inactive.fg(palette.overlay1),
+                    (false, true) => styles.faint,
+                    (false, false) => styles.normal,
+                };
+                buffer.set_style(rect, style);
+                let marker = if is_selected && actions_focus {
+                    "▸"
+                } else {
+                    " "
+                };
+                put_text(
+                    buffer,
+                    rect.x,
+                    y,
+                    rect.width,
+                    &format!("{marker} {}", entry.label),
+                    style,
+                );
+                hits.push((rect, RemotesHit::Action(entry.action)));
             }
         }
     }
 }
 
-const NO_IMAGES: &str = "No images yet. An image saves a hangar machine's root disk (installed packages and system configuration) so new machines can start from it. To save one, select a hangar machine under Remotes and choose Save as image….";
+const NO_IMAGES: &str = "No images yet. An image saves a hangar machine's root disk (installed packages and system configuration) so new machines can start from it. To save one, select a hangar machine on the remotes tab and choose Save as image….";
 
 fn render_images_tab(
     buffer: &mut Buffer,
@@ -716,7 +661,6 @@ fn render_images_tab(
         ));
     }
     lines.push((String::new(), styles.normal));
-    lines.push(("Image".into(), styles.dim.add_modifier(Modifier::BOLD)));
     let actions_focus = dialog.view.focus == Focus::Actions && !dialog.busy;
     let action_top = lines.len();
     let height = usize::from(details.height);

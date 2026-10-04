@@ -716,16 +716,32 @@ impl ClientShellState {
     }
 }
 
+/// How a machine's connection reads: a one-cell mark for narrow places (empty when
+/// there is nothing to flag), the state as a word, and its colour. Never a dot or
+/// circle, which read as agent status.
 pub(super) fn endpoint_status_presentation(
     status: ClientEndpointStatus,
     palette: &Palette,
 ) -> (&'static str, &'static str, ratatui::style::Color) {
     match status {
-        ClientEndpointStatus::Connecting => ("◐", "connecting", palette.yellow),
-        ClientEndpointStatus::Online => ("●", "online", palette.green),
-        ClientEndpointStatus::Reconnecting => ("◐", "reconnecting", palette.yellow),
+        ClientEndpointStatus::Connecting => ("…", "connecting…", palette.yellow),
+        ClientEndpointStatus::Online => ("", "online", palette.green),
+        ClientEndpointStatus::Reconnecting => ("…", "reconnecting…", palette.yellow),
         ClientEndpointStatus::Attention => ("!", "attention", palette.red),
-        ClientEndpointStatus::Disabled => ("·", "disabled", palette.overlay0),
+        ClientEndpointStatus::Disabled => ("", "disabled", palette.overlay0),
+    }
+}
+
+/// The icon before a remote machine's name everywhere it is listed; Local has none.
+/// One cell wide, drawn in the text colour.
+pub(super) const REMOTE_ICON: &str = "⇄";
+
+/// A machine's name as listed: the remote icon, then the label.
+pub(super) fn endpoint_title(endpoint_id: &ClientEndpointId, label: &str) -> String {
+    if endpoint_id.is_local() {
+        label.to_owned()
+    } else {
+        format!("{REMOTE_ICON} {label}")
     }
 }
 

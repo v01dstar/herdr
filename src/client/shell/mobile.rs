@@ -586,14 +586,14 @@ fn mobile_items(
         items.push(MobileItem::section("machines", palette));
         for endpoint in endpoints {
             let background = palette.panel_bg;
-            let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
+            let (_, state, color) = endpoint_status_presentation(endpoint.status, palette);
+            let title = super::endpoints::endpoint_title(&endpoint.endpoint_id, &endpoint.label);
             items.push(MobileItem {
                 lines: vec![
                     Line::from(vec![
                         Span::styled("  ", Style::default().bg(background)),
-                        Span::styled(symbol, Style::default().fg(color).bg(background)),
                         Span::styled(
-                            format!(" {}", endpoint.label),
+                            title,
                             Style::default()
                                 .fg(palette.text)
                                 .bg(background)
@@ -601,8 +601,14 @@ fn mobile_items(
                         ),
                     ]),
                     Line::from(Span::styled(
-                        format!("    {state}"),
-                        Style::default().fg(palette.overlay0).bg(background),
+                        format!("  {state}"),
+                        Style::default()
+                            .fg(if endpoint.status == ClientEndpointStatus::Online {
+                                palette.overlay0
+                            } else {
+                                color
+                            })
+                            .bg(background),
                     )),
                 ],
                 background,

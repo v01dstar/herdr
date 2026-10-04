@@ -554,6 +554,21 @@ impl ClientShellState {
     }
 
     pub(super) fn open_locations(&mut self) {
+        self.open_locations_with(None);
+    }
+
+    /// Opens Settings on the remotes, images or account tab.
+    pub(super) fn open_locations_on(&mut self, tab: view::RemotesTab) {
+        self.open_locations_with(Some(tab));
+    }
+
+    /// Whether opening the remotes view shows it (and not a running add or an error).
+    pub(super) fn remotes_view_can_open(&self) -> bool {
+        !self.locations.add.running() && self.locations.job.is_none()
+    }
+
+    /// Opens the remotes view on `tab`, or on the tab it showed last.
+    fn open_locations_with(&mut self, tab: Option<view::RemotesTab>) {
         if self.locations.add.running() {
             self.open_add_remote();
             return;
@@ -566,7 +581,7 @@ impl ClientShellState {
             Ok(mut dialog) => {
                 self.locations.epoch = self.locations.epoch.wrapping_add(1);
                 dialog.message = LocationPreferences::take_notice().unwrap_or_default();
-                let tab = dialog.view.tab;
+                let tab = tab.unwrap_or(dialog.view.tab);
                 self.overlay = Some(ClientShellOverlay::Locations(dialog));
                 self.locations.sync = None;
                 self.sync_machines();
@@ -894,14 +909,6 @@ impl ClientShellState {
                     crate::remote::check_saved_ssh(&profile.target, &profile.session)
                         .map(|()| JobResult::Message("SSH and Herdr session are ready".into()))
                         .map_err(|error| error.to_string())
-                });
-            }
-            RemoteAction::Status => {
-                if options.cloud.is_none() {
-                    return Err("This remote has no hangar machine".into());
-                }
-                self.location_job(move || {
-                    backend::machine_status(&options).map(JobResult::Message)
                 });
             }
             RemoteAction::Start => {
