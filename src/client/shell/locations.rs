@@ -15,17 +15,21 @@ use std::time::{Duration, Instant};
 pub(super) mod account;
 pub(super) mod add;
 
-// Rows of the remotes list (Settings → remotes), in `LocationDialog::labels` order.
-const ADD_ROW: usize = 1;
+// Rows of the remotes list (Settings → remotes), in `LocationDialog::labels` order: the
+// account, adding a remote, then the remote selector and actions on the selected remote
+// (lifecycle, connection, copies, removal).
 /// Opens the hangar account dialog (sign in, sign out).
-const ACCOUNT_ROW: usize = 2;
-const EDIT_ROW: usize = 3;
-const TEST_ROW: usize = 4;
-const DEFAULT_ROW: usize = 5;
-const STATUS_ROW: usize = 6;
-const START_ROW: usize = 7;
-const SUSPEND_ROW: usize = 8;
-const STOP_ROW: usize = 9;
+const ACCOUNT_ROW: usize = 0;
+const ADD_ROW: usize = 1;
+/// Chooses the remote the rows below act on.
+const LOCATION_ROW: usize = 2;
+const STATUS_ROW: usize = 3;
+const START_ROW: usize = 4;
+const SUSPEND_ROW: usize = 5;
+const STOP_ROW: usize = 6;
+const TEST_ROW: usize = 7;
+const EDIT_ROW: usize = 8;
+const DEFAULT_ROW: usize = 9;
 const SAVE_IMAGE_ROW: usize = 10;
 const FORK_ROW: usize = 11;
 const REMOVE_REMOTE_ROW: usize = 12;
@@ -184,16 +188,16 @@ impl LocationDialog {
         match self.kind {
             LocationDialogKind::Add(_) => &["Provider", "Machine", "Name", "Source", ""],
             LocationDialogKind::Manage => &[
-                "Location",
-                "Add remote",
                 "hangar account…",
-                "Edit remote",
-                "Test connection",
-                "Use as default",
+                "Add remote",
+                "Remote",
                 "Machine status",
                 "Start remote",
                 "Suspend remote…",
                 "Stop machine…",
+                "Test connection",
+                "Edit remote",
+                "Use as default",
                 "Save as image…",
                 "Fork machine…",
                 "Remove remote…",
@@ -294,7 +298,7 @@ impl LocationDialog {
             .unwrap_or_else(|| "Local".into())
     }
     pub fn choice_field(&self, index: usize) -> bool {
-        matches!(self.kind, LocationDialogKind::Manage) && index == 0
+        matches!(self.kind, LocationDialogKind::Manage) && index == LOCATION_ROW
             || matches!(self.kind, LocationDialogKind::New) && index == 1
     }
     pub fn cycle_location(&mut self, delta: isize) {
@@ -435,7 +439,7 @@ impl ClientShellState {
         match self.location_dialog(LocationDialogKind::Manage) {
             Ok(mut dialog) => {
                 dialog.message = LocationPreferences::take_notice().unwrap_or_else(|| {
-                    "Choose a location with ←/→. Removing a hangar remote deletes its machine after you confirm."
+                    "Press ↵ on Remote to choose a remote. Removing a hangar remote deletes its machine after you confirm."
                         .into()
                 });
                 self.overlay = Some(ClientShellOverlay::Locations(dialog));
@@ -736,7 +740,7 @@ impl ClientShellState {
             LocationDialogKind::Manage => {
                 let selected = dialog.selected;
                 match selected {
-                    0 => {
+                    LOCATION_ROW => {
                         if let Some(ClientShellOverlay::Locations(d)) = self.overlay.as_mut() {
                             d.cycle_location(1);
                         }
@@ -1090,12 +1094,14 @@ impl ClientShellState {
                 dialog.selected =
                     (dialog.selected + dialog.labels().len()) % (dialog.labels().len() + 1)
             }
-            KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
-                dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
-            }
-            // The remotes list is the Settings → Remotes tab: ←/→ move between tabs.
+            // The remotes list is the Settings → Remotes tab: ←/→ always move between tabs,
+            // like the other tabs, so holding an arrow key keeps cycling. Enter or a click
+            // cycles the Location row.
             KeyCode::Left | KeyCode::Right if matches!(dialog.kind, LocationDialogKind::Manage) => {
                 self.move_from_remotes_tab(if key.code == KeyCode::Left { -1 } else { 1 }, outcome)
+            }
+            KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
+                dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
             }
             KeyCode::Enter => self.accept_location(outcome),
             _ => {
@@ -1468,12 +1474,38 @@ mod tests {
     }
 
     #[test]
+    fn arrows_on_the_remotes_tab_keep_cycling_settings_tabs() {
+        for selected in [ACCOUNT_ROW, LOCATION_ROW] {
+            let mut state = shell();
+            let mut manage = dialog();
+            manage.kind = LocationDialogKind::Manage;
+            manage.selected = selected;
+            state.overlay = Some(ClientShellOverlay::Locations(manage));
+            state.route_location_key(
+                &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
+                    KeyCode::Right,
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                &mut ClientShellInput::default(),
+            );
+            assert!(matches!(
+                state.overlay,
+                Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                    section: ClientSettingsSection::Theme,
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
     fn remote_list_row_constants_match_their_labels() {
         let dialog = hangar_dialog();
         let labels = dialog.labels();
         for (row, label) in [
-            (ADD_ROW, "Add remote"),
             (ACCOUNT_ROW, "hangar account…"),
+            (ADD_ROW, "Add remote"),
+            (LOCATION_ROW, "Remote"),
             (EDIT_ROW, "Edit remote"),
             (TEST_ROW, "Test connection"),
             (DEFAULT_ROW, "Use as default"),
@@ -1482,6 +1514,7 @@ mod tests {
             (SUSPEND_ROW, "Suspend remote…"),
             (STOP_ROW, "Stop machine…"),
             (SAVE_IMAGE_ROW, "Save as image…"),
+            (FORK_ROW, "Fork machine…"),
             (REMOVE_REMOTE_ROW, "Remove remote…"),
             (REMOVE_PROFILE_ROW, "Remove profile"),
         ] {
@@ -1590,9 +1623,9 @@ mod tests {
     }
 
     #[test]
-    fn save_as_image_sits_next_to_the_machine_actions_and_states_what_is_saved() {
+    fn save_as_image_sits_with_fork_and_states_what_is_saved() {
         let dialog = hangar_dialog();
-        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW - 1), "Stop machine…");
+        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW - 1), "Use as default");
         assert_eq!(dialog.row_label(SAVE_IMAGE_ROW), "Save as image…");
         assert_eq!(dialog.row_label(SAVE_IMAGE_ROW + 1), "Fork machine…");
         assert_eq!(dialog.row_label(FORK_ROW), "Fork machine…");
