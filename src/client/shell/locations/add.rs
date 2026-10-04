@@ -297,6 +297,7 @@ impl ClientShellState {
         self.locations.add.discovery = Some((self.locations.epoch, receive));
         std::thread::spawn(move || {
             let result = machines::sign_in(
+                None,
                 &mut |step| {
                     let _ = send.send(Discovery::SignIn(step));
                 },

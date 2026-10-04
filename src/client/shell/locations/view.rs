@@ -308,6 +308,8 @@ pub(in crate::client::shell) enum AccountAction {
     /// Signs in again, possibly as someone else; offered while signed in.
     SwitchAccount,
     SignOut,
+    /// Opens the invite code form; offered while nobody is signed in.
+    SignUp,
 }
 
 impl AccountAction {
@@ -316,6 +318,7 @@ impl AccountAction {
             Self::SignIn => "Sign in",
             Self::SwitchAccount => "Switch account…",
             Self::SignOut => "Sign out…",
+            Self::SignUp => "Sign up with invite code…",
         }
     }
 }
@@ -577,13 +580,14 @@ impl LocationDialog {
             .map(|image| image.name.as_str())
     }
 
-    /// Switch account… and Sign out… while signed in; otherwise Sign in.
+    /// Switch account… and Sign out… while signed in; otherwise Sign in and Sign up
+    /// with invite code….
     pub(in crate::client::shell) fn account_actions(&self) -> Vec<AccountAction> {
         match &self.account {
             Some(AccountStatus::SignedIn { .. } | AccountStatus::Unverified { .. }) => {
                 vec![AccountAction::SwitchAccount, AccountAction::SignOut]
             }
-            _ => vec![AccountAction::SignIn],
+            _ => vec![AccountAction::SignIn, AccountAction::SignUp],
         }
     }
 

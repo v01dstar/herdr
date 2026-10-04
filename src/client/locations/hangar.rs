@@ -649,8 +649,10 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 
 /// Signs in to the server new remotes use (`HANGAR_SERVER`, the signed-in server, or
 /// the default): browser sign-in when possible, else a device code. Stores the
-/// sign-in shared with the hangar CLI.
+/// sign-in shared with the hangar CLI. `invite` signs up a new account with an invite
+/// code; it is sent to the server only, never logged or stored.
 pub(crate) fn sign_in(
+    invite: Option<&str>,
     notify: &mut dyn FnMut(SignInStep),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), HangarError> {
@@ -670,6 +672,7 @@ pub(crate) fn sign_in(
         &client,
         &store,
         &browser,
+        invite,
         notify,
         cancelled,
         &system_clock(),

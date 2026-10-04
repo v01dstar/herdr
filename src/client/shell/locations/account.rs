@@ -1,13 +1,24 @@
 //! The Account view of Settings → Remotes: who is signed in, Sign in (in the browser,
-//! or with a device code) and Sign out…. Herdr shares the sign-in with the hangar CLI.
-//! HTTP runs in workers; results carry the dialog epoch so a late result never
-//! overrides a newer dialog.
+//! or with a device code), Sign up with invite code… and Sign out…. Herdr shares the
+//! sign-in with the hangar CLI. HTTP runs in workers; results carry the dialog epoch so
+//! a late result never overrides a newer dialog.
+//!
+//! An invite code lives only in the sign-up form's field and the worker that sends it;
+//! it is never logged or written anywhere.
 use super::view::{AccountAction, RemotesTab};
 use super::*;
 use crate::hangar::api::HangarError;
-use crate::hangar::login::SignInStep;
+use crate::hangar::login::{InviteProblem, SignInStep};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+pub(in crate::client::shell) const SIGN_UP_NOTE: &str = "hangar is invite-only. Enter the invite code you received, then approve with GitHub in your browser. Your GitHub account becomes your hangar account.";
+pub(in crate::client::shell) const INVITE_REQUIRED: &str =
+    "This GitHub account isn't on hangar yet. Use Sign up with invite code…";
+pub(in crate::client::shell) const INVITE_INVALID: &str =
+    "That invite code isn't valid (it may be expired, revoked or already used).";
+pub(in crate::client::shell) const SIGN_UP_NOT_ACCEPTED: &str =
+    "Sign-up isn't available on this server, or the code was not accepted.";
 
 pub(in crate::client::shell) const SHARED_NOTE: &str = "Herdr and the hangar CLI share this sign-in (~/.config/hangar/credentials.json). Sign in opens your browser; over SSH or without a browser it shows a code to enter instead.";
 
@@ -33,12 +44,31 @@ fn sign_out_confirmation(status: Option<&AccountStatus>) -> String {
     format!("Sign out of hangar{server}? This revokes the sign-in on the server and removes ~/.config/hangar/credentials.json, which the hangar CLI shares, so `hangar` commands are signed out too. hangar remotes cannot start, stop or reconnect until you sign in again. Machines keep running.")
 }
 
-enum AccountEvent {
-    Step(SignInStep),
-    Finished(Result<(), String>),
+/// A failed sign-in or sign-up: the error text and, when it is about invite codes,
+/// which problem.
+#[derive(Debug)]
+struct SignInFailure {
+    message: String,
+    invite: Option<InviteProblem>,
 }
 
-type SignIn = fn(&mut dyn FnMut(SignInStep), &dyn Fn() -> bool) -> Result<(), HangarError>;
+enum AccountEvent {
+    Step(SignInStep),
+    Finished(Result<(), SignInFailure>),
+}
+
+/// Signs in, with an invite code to sign up.
+type SignIn =
+    fn(Option<&str>, &mut dyn FnMut(SignInStep), &dyn Fn() -> bool) -> Result<(), HangarError>;
+
+/// The sign-up form's text: what went wrong, if anything, then the explanation.
+fn sign_up_message(problem: &str) -> String {
+    if problem.is_empty() {
+        SIGN_UP_NOTE.to_owned()
+    } else {
+        format!("{problem}\n\n{SIGN_UP_NOTE}")
+    }
+}
 
 #[derive(Default)]
 pub(super) struct AccountController {
@@ -93,7 +123,18 @@ impl ClientShellState {
             return;
         };
         match action {
-            AccountAction::SignIn | AccountAction::SwitchAccount => self.start_account_sign_in(),
+            AccountAction::SignIn | AccountAction::SwitchAccount => {
+                self.start_account_sign_in(None)
+            }
+            AccountAction::SignUp => {
+                if self.locations.account.sign_in.is_some() {
+                    return;
+                }
+                dialog.kind = LocationDialogKind::SignUp;
+                dialog.fields = vec![TextEditor::new("", false)];
+                dialog.selected = 0;
+                dialog.message = sign_up_message("");
+            }
             AccountAction::SignOut => match &dialog.account {
                 Some(status) if !status.signed_in() => {
                     dialog.message = "Not signed in to hangar.".into();
@@ -107,7 +148,29 @@ impl ClientShellState {
         }
     }
 
-    fn start_account_sign_in(&mut self) {
+    /// ↵ in the sign-up form: checks the code's shape, then signs in with it.
+    pub(in crate::client::shell) fn submit_sign_up(&mut self) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+        if !matches!(dialog.kind, LocationDialogKind::SignUp) || dialog.busy {
+            return;
+        }
+        let entered = dialog
+            .fields
+            .first()
+            .map(|field| field.as_str())
+            .unwrap_or_default();
+        match crate::hangar::login::normalize_invite(entered) {
+            Ok(invite) => self.start_account_sign_in(Some(invite)),
+            Err(problem) => {
+                dialog.selected = 0;
+                dialog.message = sign_up_message(&problem);
+            }
+        }
+    }
+
+    fn start_account_sign_in(&mut self, invite: Option<String>) {
         if self.locations.account.sign_in.is_some() {
             return;
         }
@@ -115,7 +178,11 @@ impl ClientShellState {
             return;
         };
         dialog.busy = true;
-        dialog.message = "Starting sign-in…".into();
+        dialog.message = if invite.is_some() {
+            "Starting sign-up…".into()
+        } else {
+            "Starting sign-in…".into()
+        };
         let signer = self
             .locations
             .account
@@ -127,14 +194,17 @@ impl ClientShellState {
         self.locations.account.sign_in = Some((self.locations.epoch, receive));
         std::thread::spawn(move || {
             let result = signer(
+                invite.as_deref(),
                 &mut |step| {
                     let _ = send.send(AccountEvent::Step(step));
                 },
                 &|| cancel.load(Ordering::Acquire),
             );
-            let _ = send.send(AccountEvent::Finished(
-                result.map_err(|error| error.to_string()),
-            ));
+            let result = result.map_err(|error| SignInFailure {
+                invite: crate::hangar::login::invite_problem(&error, invite.is_some()),
+                message: error.to_string(),
+            });
+            let _ = send.send(AccountEvent::Finished(result));
         });
     }
 
@@ -169,7 +239,10 @@ impl ClientShellState {
                         Ok(event) => Some((*epoch, event)),
                         Err(mpsc::TryRecvError::Disconnected) => Some((
                             *epoch,
-                            AccountEvent::Finished(Err("Sign-in stopped unexpectedly.".into())),
+                            AccountEvent::Finished(Err(SignInFailure {
+                                message: "Sign-in stopped unexpectedly.".into(),
+                                invite: None,
+                            })),
                         )),
                         Err(mpsc::TryRecvError::Empty) => None,
                     },
@@ -186,20 +259,41 @@ impl ClientShellState {
             if let (true, Some(ClientShellOverlay::Locations(dialog))) =
                 (current, self.overlay.as_mut())
             {
-                if matches!(dialog.kind, LocationDialogKind::Manage) {
+                let sign_up = matches!(dialog.kind, LocationDialogKind::SignUp);
+                if sign_up || matches!(dialog.kind, LocationDialogKind::Manage) {
                     match event {
                         AccountEvent::Step(step) => dialog.message = step.message(),
                         AccountEvent::Finished(Ok(())) => {
                             dialog.busy = false;
+                            // A finished sign-up returns to the account with the code
+                            // dropped.
+                            dialog.kind = LocationDialogKind::Manage;
+                            dialog.fields.clear();
+                            dialog.selected = 0;
                             dialog.message = "Signed in to hangar.".into();
                             dialog.account = None;
                             dialog.view.usage = None;
                             dialog.view.images = None;
                             signed_in = true;
                         }
-                        AccountEvent::Finished(Err(error)) => {
+                        AccountEvent::Finished(Err(failure)) => {
                             dialog.busy = false;
-                            dialog.message = error;
+                            let text = match failure.invite {
+                                Some(InviteProblem::Required) => INVITE_REQUIRED.to_owned(),
+                                Some(InviteProblem::Invalid) => INVITE_INVALID.to_owned(),
+                                Some(InviteProblem::NotAccepted) => SIGN_UP_NOT_ACCEPTED.to_owned(),
+                                None => failure.message,
+                            };
+                            if sign_up {
+                                // The form stays open with the code for editing.
+                                dialog.selected = 0;
+                                dialog.message = sign_up_message(&text);
+                            } else {
+                                if failure.invite == Some(InviteProblem::Required) {
+                                    dialog.view.account_action = AccountAction::SignUp;
+                                }
+                                dialog.message = text;
+                            }
                         }
                     }
                     outcome.repaint = true;
@@ -277,6 +371,7 @@ mod tests {
     }
 
     fn browser_then_ok(
+        _invite: Option<&str>,
         notify: &mut dyn FnMut(SignInStep),
         _cancelled: &dyn Fn() -> bool,
     ) -> Result<(), HangarError> {
@@ -287,6 +382,7 @@ mod tests {
     }
 
     fn device_until_cancelled(
+        _invite: Option<&str>,
         notify: &mut dyn FnMut(SignInStep),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), HangarError> {
@@ -450,13 +546,17 @@ mod tests {
             if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
                 dialog.account = Some(status);
             }
-            assert_eq!(current(&state).account_actions(), [AccountAction::SignIn]);
+            assert_eq!(
+                current(&state).account_actions(),
+                [AccountAction::SignIn, AccountAction::SignUp]
+            );
             assert_eq!(
                 current(&state).selected_account_action(),
                 AccountAction::SignIn
             );
             let text = screen(&state);
             assert!(text.contains("▸ Sign in"), "{text}");
+            assert!(text.contains("  Sign up with invite code…"), "{text}");
             assert!(!text.contains("Sign out…"), "{text}");
             assert!(!text.contains("Switch account…"), "{text}");
         }
@@ -464,5 +564,302 @@ mod tests {
         let dialog = current(&state);
         assert!(matches!(dialog.kind, LocationDialogKind::Manage));
         assert_eq!(dialog.message, "Not signed in to hangar.");
+    }
+    const INVITE: &str = "hgi_ABCDEFGHIJKLMNOPQRST";
+
+    fn signed_out() -> AccountStatus {
+        AccountStatus::SignedOut {
+            server: "https://hangar.test".into(),
+        }
+    }
+
+    /// Settings → Remotes on the Account view, signed out.
+    fn signed_out_shell() -> ClientShellState {
+        let mut state = super::super::tests::shell();
+        let mut dialog = super::super::tests::dialog();
+        dialog.kind = LocationDialogKind::Manage;
+        state.overlay = Some(ClientShellOverlay::Locations(dialog));
+        state.locations.account.status_reader = Some(signed_out);
+        state.switch_remotes_tab(RemotesTab::Account);
+        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
+            dialog.account = Some(signed_out());
+        }
+        state
+    }
+
+    fn key(state: &mut ClientShellState, code: KeyCode) {
+        state.route_location_key(
+            &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
+                code,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut ClientShellInput::default(),
+        );
+    }
+
+    fn refused(code: &str) -> HangarError {
+        HangarError::SignInRefused {
+            code: crate::hangar::api::ErrorCode::parse(code),
+            detail: String::new(),
+        }
+    }
+
+    /// The invites each test signer received, so tests can check what was sent.
+    static RECEIVED: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+
+    fn record(invite: Option<&str>) {
+        RECEIVED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(invite.map(str::to_owned));
+    }
+
+    fn sign_up_ok(
+        invite: Option<&str>,
+        _notify: &mut dyn FnMut(SignInStep),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), HangarError> {
+        record(invite);
+        Ok(())
+    }
+
+    fn invite_required(
+        _invite: Option<&str>,
+        _notify: &mut dyn FnMut(SignInStep),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), HangarError> {
+        Err(refused("invite_required"))
+    }
+
+    fn invite_invalid(
+        _invite: Option<&str>,
+        _notify: &mut dyn FnMut(SignInStep),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), HangarError> {
+        Err(refused("invite_invalid"))
+    }
+
+    /// A server without invite codes: it ignores the invite and denies the sign-in.
+    fn old_server_denies(
+        _invite: Option<&str>,
+        _notify: &mut dyn FnMut(SignInStep),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), HangarError> {
+        Err(refused("access_denied"))
+    }
+
+    fn old_server_forbids(
+        _invite: Option<&str>,
+        _notify: &mut dyn FnMut(SignInStep),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), HangarError> {
+        Err(HangarError::Api(crate::hangar::api::ApiError {
+            status: 403,
+            code: crate::hangar::api::ErrorCode::PermissionDenied,
+            message: "not allowed".into(),
+            operation_id: None,
+        }))
+    }
+
+    /// Opens the sign-up form and enters `code`.
+    fn sign_up_form(code: &str) -> ClientShellState {
+        let mut state = signed_out_shell();
+        key(&mut state, KeyCode::Down);
+        assert_eq!(
+            current(&state).selected_account_action(),
+            AccountAction::SignUp
+        );
+        key(&mut state, KeyCode::Enter);
+        assert!(matches!(current(&state).kind, LocationDialogKind::SignUp));
+        state.insert_overlay_text(code);
+        state
+    }
+
+    fn field(state: &ClientShellState) -> String {
+        current(state)
+            .fields
+            .first()
+            .map(|field| field.as_str().to_owned())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_plain_sign_in_that_needs_an_invite_points_at_sign_up() {
+        let mut state = signed_out_shell();
+        state.locations.account.signer = Some(invite_required);
+        assert_eq!(
+            current(&state).selected_account_action(),
+            AccountAction::SignIn
+        );
+        key(&mut state, KeyCode::Enter);
+        tick_until(&mut state, |state| !current(state).busy);
+        let dialog = current(&state);
+        assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+        assert_eq!(dialog.message, INVITE_REQUIRED);
+        assert_eq!(dialog.selected_account_action(), AccountAction::SignUp);
+        let text = screen(&state);
+        assert!(text.contains("▸ Sign up with invite code…"), "{text}");
+        assert!(text.contains("isn't on hangar yet"), "{text}");
+    }
+
+    #[test]
+    fn sign_up_checks_the_code_then_signs_in_with_it_and_drops_it() {
+        RECEIVED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        let mut state = sign_up_form("");
+        state.locations.account.signer = Some(sign_up_ok);
+        let dialog = current(&state);
+        assert_eq!(dialog.title(), "sign up for hangar");
+        assert_eq!(dialog.labels(), ["Invite code"]);
+        assert_eq!(dialog.message, SIGN_UP_NOTE);
+        // Nothing entered, then something that is not an invite code: nothing is sent.
+        key(&mut state, KeyCode::Enter);
+        assert!(current(&state)
+            .message
+            .starts_with("Enter the invite code you received.\n\n"));
+        state.insert_overlay_text("hgi_short");
+        key(&mut state, KeyCode::Enter);
+        assert!(current(&state).message.contains("start with hgi_"));
+        assert!(current(&state).message.ends_with(SIGN_UP_NOTE));
+        assert!(!current(&state).busy);
+        assert!(RECEIVED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty());
+        // A valid code (surrounding spaces trimmed) signs up.
+        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
+            dialog.fields[0] = TextEditor::new("", false);
+        }
+        state.insert_overlay_text(&format!("  {INVITE} "));
+        key(&mut state, KeyCode::Enter);
+        assert!(current(&state).busy);
+        assert_eq!(current(&state).message, "Starting sign-up…");
+        tick_until(&mut state, |state| {
+            current(state).message == "Signed in to hangar." && current(state).account.is_some()
+        });
+        assert_eq!(
+            *RECEIVED.lock().unwrap_or_else(|p| p.into_inner()),
+            [Some(INVITE.to_owned())]
+        );
+        let dialog = current(&state);
+        assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+        assert!(dialog.fields.is_empty(), "the code is dropped");
+        assert!(!format!("{:?}", state.locations.account).contains(INVITE));
+    }
+
+    #[test]
+    fn an_invalid_invite_keeps_the_form_open_with_the_code() {
+        let mut state = sign_up_form(INVITE);
+        state.locations.account.signer = Some(invite_invalid);
+        key(&mut state, KeyCode::Enter);
+        tick_until(&mut state, |state| !current(state).busy);
+        let dialog = current(&state);
+        assert!(matches!(dialog.kind, LocationDialogKind::SignUp));
+        assert_eq!(field(&state), INVITE);
+        assert_eq!(dialog.selected, 0);
+        assert_eq!(
+            dialog.message,
+            format!("{INVITE_INVALID}\n\n{SIGN_UP_NOTE}")
+        );
+        // Edit and resubmit.
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!(field(&state), &INVITE[..INVITE.len() - 1]);
+    }
+
+    #[test]
+    fn a_server_without_sign_up_is_reported_honestly() {
+        for signer in [old_server_denies as SignIn, old_server_forbids] {
+            let mut state = sign_up_form(INVITE);
+            state.locations.account.signer = Some(signer);
+            key(&mut state, KeyCode::Enter);
+            tick_until(&mut state, |state| !current(state).busy);
+            let dialog = current(&state);
+            assert!(matches!(dialog.kind, LocationDialogKind::SignUp));
+            assert!(dialog.message.starts_with(SIGN_UP_NOT_ACCEPTED));
+            assert!(!dialog.message.contains("Signed in"));
+            assert!(state.locations.account.last_status() != Some(signed_in()));
+        }
+        // Without an invite the same denial is reported as it is.
+        let mut state = signed_out_shell();
+        state.locations.account.signer = Some(old_server_denies);
+        key(&mut state, KeyCode::Enter);
+        tick_until(&mut state, |state| !current(state).busy);
+        assert_eq!(current(&state).message, "hangar: sign-in was denied");
+    }
+
+    #[test]
+    fn esc_cancels_a_running_sign_up_and_returns_to_the_account() {
+        let mut state = sign_up_form(INVITE);
+        state.locations.account.signer = Some(device_until_cancelled);
+        key(&mut state, KeyCode::Enter);
+        tick_until(&mut state, |state| {
+            current(state).message.contains("ABCD-EFGH")
+        });
+        assert!(matches!(current(&state).kind, LocationDialogKind::SignUp));
+        let cancel = state.locations.account.cancel.clone().unwrap();
+        key(&mut state, KeyCode::Esc);
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(state.locations.account.sign_in.is_none());
+        let dialog = current(&state);
+        assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+        assert!(!dialog.busy);
+        assert!(dialog.fields.is_empty());
+        assert_eq!(dialog.view.tab, RemotesTab::Account);
+        assert_eq!(dialog.selected_account_action(), AccountAction::SignUp);
+        // Esc on the idle form also goes back.
+        let mut state = sign_up_form(INVITE);
+        key(&mut state, KeyCode::Esc);
+        assert!(matches!(current(&state).kind, LocationDialogKind::Manage));
+        assert!(current(&state).fields.is_empty());
+    }
+
+    #[test]
+    fn signed_in_accounts_offer_no_sign_up() {
+        let mut state = account_shell();
+        if let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() {
+            dialog.account = Some(signed_in());
+            dialog.view.account_action = AccountAction::SignUp;
+        }
+        assert_eq!(
+            current(&state).account_actions(),
+            [AccountAction::SwitchAccount, AccountAction::SignOut]
+        );
+        assert_eq!(
+            current(&state).selected_account_action(),
+            AccountAction::SwitchAccount
+        );
+        assert!(!screen(&state).contains("Sign up"));
+    }
+
+    #[test]
+    fn signed_out_account_and_sign_up_form_render_at_large_and_small_sizes() {
+        let state = signed_out_shell();
+        for (width, height) in [(120, 40), (64, 20)] {
+            let text = screen_at(&state, width, height);
+            println!("--- account tab, signed out, {width}x{height}\n{text}");
+            assert!(text.contains("▸ Sign in"), "{text}");
+            assert!(text.contains("Sign up with invite code…"), "{text}");
+        }
+        let mut state = sign_up_form(INVITE);
+        state.locations.account.signer = Some(invite_invalid);
+        key(&mut state, KeyCode::Enter);
+        tick_until(&mut state, |state| !current(state).busy);
+        let text = screen_at(&state, 120, 40);
+        println!("--- sign-up form, invalid code, 120x40\n{text}");
+        assert!(text.contains("That invite code isn't valid"), "{text}");
+        assert!(text.contains("hangar is invite-only."), "{text}");
+        let state = sign_up_form("hgi_ABCDEFGHIJ");
+        for (width, height) in [(120, 40), (64, 20)] {
+            let text = screen_at(&state, width, height);
+            println!("--- sign-up form, {width}x{height}\n{text}");
+            for part in [
+                "sign up for hangar",
+                "Invite code: hgi_ABCDEFGHIJ",
+                "hangar is invite-only.",
+                "↵ sign up",
+                "esc back",
+            ] {
+                assert!(text.contains(part), "{part}\n{text}");
+            }
+        }
     }
 }

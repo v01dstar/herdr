@@ -18,7 +18,12 @@ pub(in crate::client::shell) fn render_locations(
         }
         _ => {}
     }
-    let area = popup(buffer.area, 78, 24)?;
+    // The sign-up form has one field and a few lines of text.
+    let (width, height) = match dialog.kind {
+        LocationDialogKind::SignUp => (72, 16),
+        _ => (78, 24),
+    };
+    let area = popup(buffer.area, width, height)?;
     let inner = panel(buffer, area, palette.accent, palette.panel_bg)?;
     if inner.width < 20 || inner.height < 7 {
         return None;
@@ -71,8 +76,11 @@ pub(in crate::client::shell) fn render_locations(
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
     // Confirmations have no rows, so their text gets the whole body; the Copy machine…
-    // forms have few rows and a long explanation below them.
-    let message_area = if matches!(dialog.kind, LocationDialogKind::Copy(_)) {
+    // and sign-up forms have few rows and a long explanation below them.
+    let message_area = if matches!(
+        dialog.kind,
+        LocationDialogKind::Copy(_) | LocationDialogKind::SignUp
+    ) {
         let top = inner.y + 2 + dialog.labels().len() as u16 + 1;
         Rect::new(
             inner.x + 1,
@@ -106,6 +114,7 @@ pub(in crate::client::shell) fn render_locations(
             LocationDialogKind::Add(_) => " ↵ connect ",
             LocationDialogKind::Manage => " ↵ select ",
             LocationDialogKind::SignOut => " ↵ sign out ",
+            LocationDialogKind::SignUp => " ↵ sign up ",
             LocationDialogKind::Edit(_) => " ↵ save ",
             LocationDialogKind::Stop => " ↵ stop ",
             LocationDialogKind::Suspend => " ↵ suspend ",

@@ -30,6 +30,8 @@ pub(super) enum LocationDialogKind {
     DeleteImage(Box<ImageDeleteRequest>),
     /// Confirms Sign out….
     SignOut,
+    /// Sign up with invite code…: the invite code, then the sign-in flow with it.
+    SignUp,
 }
 
 /// The two ways Copy machine… copies a hangar machine.
@@ -186,6 +188,7 @@ impl LocationDialog {
             },
             LocationDialogKind::DeleteImage(_) => "delete image".into(),
             LocationDialogKind::SignOut => "sign out of hangar".into(),
+            LocationDialogKind::SignUp => "sign up for hangar".into(),
         }
     }
     pub fn labels(&self) -> &[&str] {
@@ -199,6 +202,7 @@ impl LocationDialog {
                 (true, CopyChoice::Clone) => &["Name"],
                 (true, CopyChoice::Image) => &["Image name", "Description"],
             },
+            LocationDialogKind::SignUp => &["Invite code"],
             LocationDialogKind::Manage
             | LocationDialogKind::Stop
             | LocationDialogKind::Suspend
@@ -585,6 +589,16 @@ impl ClientShellState {
             return;
         }
         self.locations.add.cancel_sign_in();
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Locations(LocationDialog {
+                kind: LocationDialogKind::SignUp,
+                ..
+            }))
+        ) {
+            // Esc stops a sign-up that is waiting for the browser or a device code.
+            self.locations.account.cancel_sign_in();
+        }
         let busy = self.locations.job.is_some();
         if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
             dialog.kind = LocationDialogKind::Manage;
@@ -851,6 +865,10 @@ impl ClientShellState {
             }
             LocationDialogKind::SignOut => {
                 self.location_job(|| backend::hangar::sign_out().map(JobResult::Message));
+                Ok(())
+            }
+            LocationDialogKind::SignUp => {
+                self.submit_sign_up();
                 Ok(())
             }
             LocationDialogKind::DeleteImage(request) => {

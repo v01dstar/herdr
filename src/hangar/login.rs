@@ -7,6 +7,9 @@
 //! with the verifier. Anything that goes wrong before the browser opens (no display,
 //! SSH session, a server without browser sign-in, no free port) falls back to the
 //! device code. Everything here blocks and runs on worker threads.
+//!
+//! Sign-up is the same flow with an invite code: `&invite=` on the start URL, or
+//! `invite` in the device start request. The code is never logged or stored.
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -92,12 +95,58 @@ fn cancelled_error() -> HangarError {
     HangarError::Invalid("sign-in cancelled".into())
 }
 
+/// The invite code prefix (`hgi_` and 20 base32 characters).
+const INVITE_PREFIX: &str = "hgi_";
+const INVITE_BODY_LEN: usize = 20;
+
+/// Trims an entered invite code and checks its shape; the server decides whether it
+/// is valid. `Err` is a message for the user.
+pub(crate) fn normalize_invite(code: &str) -> Result<String, String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("Enter the invite code you received.".into());
+    }
+    let body = code.strip_prefix(INVITE_PREFIX).unwrap_or_default();
+    if body.len() != INVITE_BODY_LEN || !body.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "That doesn't look like an invite code: they start with {INVITE_PREFIX} followed by {INVITE_BODY_LEN} letters and digits."
+        ));
+    }
+    Ok(code.to_owned())
+}
+
+/// Why a sign-in or sign-up failed, as far as invite codes are concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InviteProblem {
+    /// The account is not on hangar and no invite code was given.
+    Required,
+    /// The invite code is unknown, expired, revoked or used up.
+    Invalid,
+    /// An invite code was sent and the sign-in was refused without saying why: a
+    /// server without invite codes, or one that did not accept it.
+    NotAccepted,
+}
+
+/// Classifies a failed sign-in; `invite_sent` says whether it carried an invite code.
+pub(crate) fn invite_problem(error: &HangarError, invite_sent: bool) -> Option<InviteProblem> {
+    match error.code()? {
+        ErrorCode::InviteRequired => Some(InviteProblem::Required),
+        ErrorCode::InviteInvalid => Some(InviteProblem::Invalid),
+        ErrorCode::AccessDenied | ErrorCode::PermissionDenied if invite_sent => {
+            Some(InviteProblem::NotAccepted)
+        }
+        _ => None,
+    }
+}
+
 /// Signs in and stores the tokens in the shared credentials, replacing any previous
-/// sign-in. `notify` receives each step to show; `cancelled` is polled while waiting.
+/// sign-in. `invite` signs up a new account with an invite code. `notify` receives
+/// each step to show; `cancelled` is polled while waiting.
 pub(crate) fn sign_in(
     client: &Client,
     store: &CredentialStore,
     browser: &Browser<'_>,
+    invite: Option<&str>,
     mut notify: impl FnMut(SignInStep),
     cancelled: impl Fn() -> bool,
     now: &Clock,
@@ -106,6 +155,7 @@ pub(crate) fn sign_in(
         client,
         store,
         browser,
+        invite,
         &mut notify,
         &cancelled,
         now,
@@ -113,10 +163,12 @@ pub(crate) fn sign_in(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // The public entry point fixes the timeout.
 fn sign_in_with_timeout(
     client: &Client,
     store: &CredentialStore,
     browser: &Browser<'_>,
+    invite: Option<&str>,
     notify: &mut dyn FnMut(SignInStep),
     cancelled: &dyn Fn() -> bool,
     now: &Clock,
@@ -124,7 +176,15 @@ fn sign_in_with_timeout(
 ) -> Result<(), HangarError> {
     let reason = match &browser.unavailable {
         Some(reason) => reason.clone(),
-        None => match browser_sign_in(client, store, browser.open, notify, cancelled, timeout) {
+        None => match browser_sign_in(
+            client,
+            store,
+            browser.open,
+            invite,
+            notify,
+            cancelled,
+            timeout,
+        ) {
             Ok(()) => return Ok(()),
             Err(Attempt::Failed(error)) => return Err(error),
             Err(Attempt::Fallback(reason)) => {
@@ -140,6 +200,7 @@ fn sign_in_with_timeout(
     super::auth::sign_in(
         client,
         store,
+        invite,
         |device| {
             notify(SignInStep::Device {
                 device: device.clone(),
@@ -171,6 +232,7 @@ fn browser_sign_in(
     client: &Client,
     store: &CredentialStore,
     open: &dyn Fn(&str) -> Result<(), String>,
+    invite: Option<&str>,
     notify: &mut dyn FnMut(SignInStep),
     cancelled: &dyn Fn() -> bool,
     timeout: Duration,
@@ -190,7 +252,7 @@ fn browser_sign_in(
     let (verifier, state) = random_url_safe(32)
         .and_then(|verifier| Ok((verifier, random_url_safe(24)?)))
         .map_err(|error| Attempt::Fallback(format!("no secure random numbers: {error}")))?;
-    let url = client.cli_start_url(&redirect, &state, &code_challenge(&verifier));
+    let url = client.cli_start_url(&redirect, &state, &code_challenge(&verifier), invite);
     open(&url).map_err(|error| Attempt::Fallback(format!("cannot open a browser: {error}")))?;
     notify(SignInStep::Browser { url });
     let deadline = Instant::now() + timeout;
@@ -311,10 +373,12 @@ fn read_callback(mut stream: TcpStream, state: &str) -> Option<(TcpStream, Callb
         return None;
     }
     let callback = match (param("error"), param("code")) {
-        ("access_denied", _) => Callback::Error(HangarError::Invalid(describe(
-            "sign-in was denied",
-            param("error_description"),
-        ))),
+        (code @ ("access_denied" | "invite_required" | "invite_invalid"), _) => {
+            Callback::Error(HangarError::SignInRefused {
+                code: ErrorCode::parse(code),
+                detail: describe("", param("error_description")),
+            })
+        }
         ("", "") => Callback::Error(HangarError::Invalid("sign-in returned no code".into())),
         ("", code) => Callback::Code(code.to_owned()),
         (error, _) => Callback::Error(HangarError::Invalid(describe(
@@ -325,6 +389,8 @@ fn read_callback(mut stream: TcpStream, state: &str) -> Option<(TcpStream, Callb
     Some((stream, callback))
 }
 
+/// `summary: description` with the server's description cleaned and bounded; just
+/// the description when `summary` is empty.
 fn describe(summary: &str, description: &str) -> String {
     let description: String = description
         .chars()
@@ -333,6 +399,8 @@ fn describe(summary: &str, description: &str) -> String {
         .collect();
     if description.is_empty() {
         summary.to_owned()
+    } else if summary.is_empty() {
+        description
     } else {
         format!("{summary}: {description}")
     }
@@ -487,12 +555,36 @@ mod tests {
         cancelled: &dyn Fn() -> bool,
         timeout: Duration,
     ) -> Result<(), HangarError> {
+        run_with_invite(
+            http,
+            store,
+            open,
+            unavailable,
+            None,
+            steps,
+            cancelled,
+            timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors sign_in_with_timeout.
+    fn run_with_invite(
+        http: &Arc<FakeHttp>,
+        store: &CredentialStore,
+        open: &dyn Fn(&str) -> Result<(), String>,
+        unavailable: Option<String>,
+        invite: Option<&str>,
+        steps: &mut Vec<SignInStep>,
+        cancelled: &dyn Fn() -> bool,
+        timeout: Duration,
+    ) -> Result<(), HangarError> {
         let client = Client::new("https://hangar.test", http.clone(), None).without_sleep();
         let browser = Browser { unavailable, open };
         sign_in_with_timeout(
             &client,
             store,
             &browser,
+            invite,
             &mut |step| steps.push(step),
             cancelled,
             &system_clock(),
@@ -816,5 +908,227 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+    const INVITE: &str = "hgi_ABCDEFGHIJKLMNOPQRST";
+
+    /// Captures every tracing event of the current thread, at any level.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn traced<T>(work: impl FnOnce() -> T) -> (T, String) {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, work);
+        let log = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        (result, log)
+    }
+
+    /// Every file the credential store left behind, concatenated.
+    fn stored_files(dir: &std::path::Path) -> String {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sign_up_sends_the_invite_in_the_start_url_and_never_keeps_it() {
+        let http = FakeHttp::new();
+        http.reply(400, serde_json::json!({})).reply(200, tokens());
+        let dir = temp_dir("signup");
+        let store = CredentialStore::at(dir.clone());
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let open = browser(
+            opened.clone(),
+            |state| vec![format!("code=hgc_1&state={state}")],
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let (result, log) = traced(|| {
+            run_with_invite(
+                &http,
+                &store,
+                &open,
+                None,
+                Some(INVITE),
+                &mut Vec::new(),
+                &|| false,
+                Duration::from_secs(20),
+            )
+        });
+        result.unwrap();
+        let url = opened.lock().unwrap()[0].clone();
+        assert_eq!(query_param(&url, "invite"), INVITE);
+        assert!(url.ends_with(&format!("&invite={INVITE}")), "{url}");
+        // The exchange itself does not carry the invite.
+        let exchange = http.sent().last().unwrap().body.clone().unwrap();
+        assert!(!exchange.contains(INVITE), "{exchange}");
+        assert!(!log.contains(INVITE), "{log}");
+        let files = stored_files(&dir);
+        assert!(files.contains("\"a1\""), "{files}");
+        assert!(!files.contains(INVITE), "{files}");
+        assert!(!files.contains("hgi_"), "{files}");
+    }
+
+    /// Runs a browser sign-in whose callback returns `error`; returns the error.
+    fn browser_error(error: &'static str, invite: Option<&str>) -> HangarError {
+        let http = FakeHttp::new();
+        http.reply(400, serde_json::json!({}));
+        let dir = temp_dir("invite-error");
+        let store = CredentialStore::at(dir.clone());
+        let open = browser(
+            Arc::new(Mutex::new(Vec::new())),
+            move |state| vec![format!("error={error}&state={state}")],
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let (result, log) = traced(|| {
+            run_with_invite(
+                &http,
+                &store,
+                &open,
+                None,
+                invite,
+                &mut Vec::new(),
+                &|| false,
+                Duration::from_secs(20),
+            )
+        });
+        assert_eq!(http.sent().len(), 1, "a refused sign-in is never exchanged");
+        assert!(store.load().unwrap().is_none());
+        assert!(!log.contains(INVITE), "{log}");
+        assert!(!stored_files(&dir).contains(INVITE));
+        result.unwrap_err()
+    }
+
+    #[test]
+    fn browser_callback_errors_map_to_invite_problems() {
+        let required = browser_error("invite_required", None);
+        assert_eq!(
+            invite_problem(&required, false),
+            Some(InviteProblem::Required)
+        );
+        assert!(required.to_string().contains("isn't on hangar yet"));
+        let invalid = browser_error("invite_invalid", Some(INVITE));
+        assert_eq!(invite_problem(&invalid, true), Some(InviteProblem::Invalid));
+        assert!(!invalid.to_string().contains(INVITE));
+        // A server without invite codes ignores the invite and denies the sign-in.
+        let denied = browser_error("access_denied", Some(INVITE));
+        assert_eq!(
+            invite_problem(&denied, true),
+            Some(InviteProblem::NotAccepted)
+        );
+        // Without an invite a denial is just a denial.
+        let denied = browser_error("access_denied", None);
+        assert_eq!(invite_problem(&denied, false), None);
+        assert_eq!(denied.to_string(), "hangar: sign-in was denied");
+        let failed = browser_error("server_error", Some(INVITE));
+        assert_eq!(invite_problem(&failed, true), None);
+        assert_eq!(failed.to_string(), "hangar: sign-in failed (server_error)");
+    }
+
+    /// Runs a device sign-up whose first poll fails with `code`.
+    fn device_error(
+        code: &str,
+        invite: Option<&str>,
+    ) -> (HangarError, Vec<super::super::api::HttpRequest>) {
+        let http = FakeHttp::new();
+        // No browser sign-in on this server: the fallback is logged.
+        http.reply(404, serde_json::json!({}));
+        http.reply(
+            200,
+            serde_json::json!({"deviceCode": "dc", "userCode": "ABCD-EFGH", "verificationUri": "https://github.com/login/device", "interval": 1}),
+        )
+        .error(400, code);
+        let dir = temp_dir("device-invite");
+        let store = CredentialStore::at(dir.clone());
+        let open = |_: &str| -> Result<(), String> { Ok(()) };
+        let (result, log) = traced(|| {
+            run_with_invite(
+                &http,
+                &store,
+                &open,
+                None,
+                invite,
+                &mut Vec::new(),
+                &|| false,
+                Duration::from_secs(5),
+            )
+        });
+        assert!(
+            log.contains("using the hangar device code sign-in"),
+            "{log}"
+        );
+        assert!(!log.contains(INVITE), "{log}");
+        assert!(!stored_files(&dir).contains(INVITE));
+        // Skip the browser probe.
+        (result.unwrap_err(), http.sent()[1..].to_vec())
+    }
+
+    #[test]
+    fn device_sign_up_sends_the_invite_and_maps_poll_errors() {
+        let (error, sent) = device_error("invite_invalid", Some(INVITE));
+        assert_eq!(
+            sent[0].body.as_deref(),
+            Some(r#"{"invite":"hgi_ABCDEFGHIJKLMNOPQRST"}"#)
+        );
+        assert_eq!(sent[1].body.as_deref(), Some(r#"{"deviceCode":"dc"}"#));
+        assert_eq!(invite_problem(&error, true), Some(InviteProblem::Invalid));
+        let (error, sent) = device_error("invite_required", None);
+        assert_eq!(sent[0].body, None, "a plain sign-in sends no invite");
+        assert_eq!(invite_problem(&error, false), Some(InviteProblem::Required));
+        let (error, _) = device_error("access_denied", Some(INVITE));
+        assert_eq!(
+            invite_problem(&error, true),
+            Some(InviteProblem::NotAccepted)
+        );
+        let (error, _) = device_error("permission_denied", Some(INVITE));
+        assert_eq!(
+            invite_problem(&error, true),
+            Some(InviteProblem::NotAccepted)
+        );
+        let (error, _) = device_error("access_denied", None);
+        assert_eq!(invite_problem(&error, false), None);
+        assert_eq!(error.to_string(), "hangar: sign-in was denied");
+    }
+
+    #[test]
+    fn invite_codes_are_trimmed_and_checked_lightly() {
+        assert_eq!(
+            normalize_invite(&format!("  {INVITE}\n")).as_deref(),
+            Ok(INVITE)
+        );
+        assert_eq!(
+            normalize_invite("   "),
+            Err("Enter the invite code you received.".into())
+        );
+        for wrong in [
+            "ABCDEFGHIJKLMNOPQRST",
+            "hgi_ABCDEFGHIJKLMNOPQRS",
+            "hgi_ABCDEFGHIJKLMNOPQRSTU",
+            "hgx_ABCDEFGHIJKLMNOPQRST",
+            "hgi_ABCDEFGHIJ-LMNOPQRST",
+        ] {
+            let error = normalize_invite(wrong).unwrap_err();
+            assert!(error.contains("start with hgi_"), "{wrong}: {error}");
+        }
     }
 }

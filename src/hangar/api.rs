@@ -39,6 +39,10 @@ pub(crate) enum ErrorCode {
     AccessDenied,
     /// The loopback sign-in code expired, was reused or did not match.
     InvalidGrant,
+    /// Sign-in: this account is not on hangar and no invite code was given.
+    InviteRequired,
+    /// Sign-up: the invite code is unknown, expired, revoked or used up.
+    InviteInvalid,
     Unknown(String),
 }
 
@@ -61,6 +65,8 @@ impl ErrorCode {
             "expired_token" => Self::ExpiredToken,
             "access_denied" => Self::AccessDenied,
             "invalid_grant" => Self::InvalidGrant,
+            "invite_required" => Self::InviteRequired,
+            "invite_invalid" => Self::InviteInvalid,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -461,8 +467,21 @@ pub(crate) enum HangarError {
     Transport(TransportError),
     NotSignedIn,
     SessionExpired,
-    WrongServer { signed_in: String, wanted: String },
-    MachineNotRunning { machine: String, state: String },
+    WrongServer {
+        signed_in: String,
+        wanted: String,
+    },
+    MachineNotRunning {
+        machine: String,
+        state: String,
+    },
+    /// The server or the user refused a sign-in (`access_denied`, `invite_required`,
+    /// `invite_invalid`, ...), from a loopback callback or a device poll. `detail` is
+    /// the server's description, if any.
+    SignInRefused {
+        code: ErrorCode,
+        detail: String,
+    },
     Invalid(String),
 }
 
@@ -470,6 +489,7 @@ impl HangarError {
     pub(crate) fn code(&self) -> Option<&ErrorCode> {
         match self {
             Self::Api(error) => Some(&error.code),
+            Self::SignInRefused { code, .. } => Some(code),
             _ => None,
         }
     }
@@ -528,6 +548,24 @@ impl std::fmt::Display for HangarError {
                 "hangar machine {machine} is {state}; use Start remote to start it."
             ),
             Self::Invalid(message) => write!(f, "hangar: {message}"),
+            Self::SignInRefused { code, detail } => {
+                let summary = match code {
+                    ErrorCode::AccessDenied => "sign-in was denied".to_owned(),
+                    ErrorCode::InviteRequired => {
+                        return write!(f, "hangar: this GitHub account isn't on hangar yet. Sign up with an invite code from Settings → Remotes → Account.")
+                    }
+                    ErrorCode::InviteInvalid => {
+                        return write!(f, "hangar: that invite code isn't valid (it may be expired, revoked or already used)")
+                    }
+                    ErrorCode::Unknown(code) => format!("sign-in failed ({code})"),
+                    _ => "sign-in failed".to_owned(),
+                };
+                if detail.is_empty() {
+                    write!(f, "hangar: {summary}")
+                } else {
+                    write!(f, "hangar: {summary}: {detail}")
+                }
+            }
             Self::Transport(TransportError::Timeout) => {
                 write!(f, "hangar did not respond in time; the outcome is unknown")
             }
@@ -1022,8 +1060,11 @@ impl Client {
         )
     }
 
-    pub(crate) fn start_device(&self) -> Result<DeviceStart, HangarError> {
-        self.call("POST", "/v1/auth/device", None, None, false)
+    /// Starts a device code sign-in; `invite` signs up a new account with an invite
+    /// code. Without one the request has no body, as before invite codes existed.
+    pub(crate) fn start_device(&self, invite: Option<&str>) -> Result<DeviceStart, HangarError> {
+        let body = invite.map(|invite| serde_json::json!({ "invite": invite }).to_string());
+        self.call("POST", "/v1/auth/device", body, None, false)
     }
 
     pub(crate) fn poll_device(&self, device_code: &str) -> Result<Tokens, HangarError> {
@@ -1058,15 +1099,27 @@ impl Client {
         }
     }
 
-    /// The page that starts the loopback sign-in in the user's browser.
-    pub(crate) fn cli_start_url(&self, redirect_uri: &str, state: &str, challenge: &str) -> String {
-        format!(
+    /// The page that starts the loopback sign-in in the user's browser; `invite`
+    /// signs up a new account with an invite code.
+    pub(crate) fn cli_start_url(
+        &self,
+        redirect_uri: &str,
+        state: &str,
+        challenge: &str,
+        invite: Option<&str>,
+    ) -> String {
+        let mut url = format!(
             "{}/auth/cli/start?redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
             self.server,
             query_escape(redirect_uri),
             query_escape(state),
             query_escape(challenge)
-        )
+        );
+        if let Some(invite) = invite {
+            url.push_str("&invite=");
+            url.push_str(&query_escape(invite));
+        }
+        url
     }
 
     /// Exchanges a one-time loopback code. Never retried: codes are single use.
@@ -1342,6 +1395,38 @@ mod tests {
         assert_eq!(
             ErrorCode::parse("teleport_failed"),
             ErrorCode::Unknown("teleport_failed".into())
+        );
+        assert_eq!(
+            ErrorCode::parse("invite_required"),
+            ErrorCode::InviteRequired
+        );
+        assert_eq!(ErrorCode::parse("invite_invalid"), ErrorCode::InviteInvalid);
+    }
+
+    #[test]
+    fn invite_codes_are_sent_only_when_given() {
+        let http = FakeHttp::new();
+        let device =
+            serde_json::json!({"deviceCode": "dc", "userCode": "U", "verificationUri": "v"});
+        http.reply(200, device.clone()).reply(200, device);
+        let client = client(&http);
+        client.start_device(None).unwrap();
+        client
+            .start_device(Some("hgi_ABCDEFGHIJKLMNOPQRST"))
+            .unwrap();
+        let sent = http.sent();
+        assert_eq!(sent[0].body, None);
+        assert_eq!(
+            sent[1].body.as_deref(),
+            Some(r#"{"invite":"hgi_ABCDEFGHIJKLMNOPQRST"}"#)
+        );
+        let url = client.cli_start_url("http://127.0.0.1:1/callback", "s", "c", None);
+        assert!(!url.contains("invite"), "{url}");
+        assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
+        let url = client.cli_start_url("http://127.0.0.1:1/callback", "s", "c", Some("hgi_a b&c"));
+        assert!(
+            url.ends_with("&code_challenge_method=S256&invite=hgi_a%20b%26c"),
+            "{url}"
         );
     }
 

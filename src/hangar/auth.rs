@@ -430,9 +430,27 @@ pub(crate) fn poll_device_once(
             Some(ErrorCode::ExpiredToken) => Err(HangarError::Invalid(
                 "the sign-in code expired; start sign-in again".into(),
             )),
-            Some(ErrorCode::AccessDenied) => Err(HangarError::Invalid("sign-in was denied".into())),
-            _ => Err(error),
+            _ => Err(refused(error)),
         },
+    }
+}
+
+/// A refused sign-in or sign-up (`access_denied`, `invite_required`, `invite_invalid`)
+/// keeps its code so callers can tell the cases apart; other errors pass unchanged.
+pub(crate) fn refused(error: HangarError) -> HangarError {
+    match error {
+        HangarError::Api(api)
+            if matches!(
+                api.code,
+                ErrorCode::AccessDenied | ErrorCode::InviteRequired | ErrorCode::InviteInvalid
+            ) =>
+        {
+            HangarError::SignInRefused {
+                code: api.code,
+                detail: String::new(),
+            }
+        }
+        error => error,
     }
 }
 
@@ -453,14 +471,16 @@ pub(crate) fn save_sign_in(
 
 /// GitHub device flow against `/v1/auth/device`. `show` receives the code to display;
 /// polling honours the interval and `slow_down` and stops when `cancelled` turns true.
+/// `invite` signs up a new account with an invite code; it is only sent, never kept.
 pub(crate) fn sign_in(
     client: &Client,
     store: &CredentialStore,
+    invite: Option<&str>,
     mut show: impl FnMut(&DeviceStart),
     cancelled: impl Fn() -> bool,
     now: &Clock,
 ) -> Result<(), HangarError> {
-    let device = client.start_device()?;
+    let device = client.start_device(invite).map_err(refused)?;
     if device.device_code.is_empty() || device.user_code.is_empty() {
         return Err(HangarError::Invalid("sign-in returned no code".into()));
     }
@@ -792,6 +812,7 @@ pub(crate) mod tests {
         sign_in(
             &client,
             &store,
+            None,
             |device| shown.push(device.user_code.clone()),
             || false,
             &system_clock(),
@@ -814,14 +835,14 @@ pub(crate) mod tests {
             )
             .error(400, "access_denied");
         let client = Client::new("https://hangar.test", denied, None).without_sleep();
-        assert!(sign_in(&client, &store, |_| {}, || false, &system_clock()).is_err());
+        assert!(sign_in(&client, &store, None, |_| {}, || false, &system_clock()).is_err());
         let cancelled = FakeHttp::new();
         cancelled.reply(
             200,
             serde_json::json!({"deviceCode": "dc", "userCode": "X", "verificationUri": "u"}),
         );
         let client = Client::new("https://hangar.test", cancelled.clone(), None).without_sleep();
-        assert!(sign_in(&client, &store, |_| {}, || true, &system_clock()).is_err());
+        assert!(sign_in(&client, &store, None, |_| {}, || true, &system_clock()).is_err());
         assert_eq!(cancelled.sent().len(), 1);
     }
 }

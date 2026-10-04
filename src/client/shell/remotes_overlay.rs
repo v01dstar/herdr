@@ -146,8 +146,8 @@ pub(in crate::client::shell) fn render_remotes(
         styles.bold.bg(palette.surface0),
     );
     let hint = match (dialog.view.tab, dialog.view.focus) {
-        (RemotesTab::Account, _) => " ↑↓ select  ↵ run  ←→ tab  esc close",
-        (_, Focus::List) => " ↑↓ select  ↵ actions  ←→ tab  esc close",
+        (RemotesTab::Account, _) => " ↑↓ select  ↵ run  ←→ tab",
+        (_, Focus::List) => " ↑↓ select  ↵ actions  ←→ tab",
         (_, Focus::Actions) => " ↑↓ select  ↵ run  esc back to list  ←→ tab",
     };
     put_text(
