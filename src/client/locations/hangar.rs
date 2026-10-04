@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use crate::hangar::api::{
     Client, CreateImageRequest, CreateMachineRequest, CurlHttp, ErrorCode, ForkMachineRequest,
-    HangarError, Image, Machine, MachineState, Operation, OperationState, Template,
-    TemplateCapability,
+    HangarError, Image, Machine, MachineSpec, MachineState, Operation, OperationState, Template,
+    TemplateCapability, Usage,
 };
 use crate::hangar::auth::{system_clock, AccountStatus, CredentialStore, SignOut};
 use crate::hangar::binding::HangarBinding;
@@ -566,6 +566,54 @@ pub(crate) fn sort_images(images: &mut [Image]) {
     });
 }
 
+/// What Settings → Remotes shows about a hangar machine besides its state; read from
+/// the machine list on the settings sync worker, kept only in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MachineDetails {
+    /// `herdr@2026-10-03.2`, when the server reports it.
+    pub template: Option<String>,
+    pub spec: Option<MachineSpec>,
+    /// The image it was created from.
+    pub image_id: Option<String>,
+    /// The machine it was forked from.
+    pub forked_from: Option<String>,
+    /// Whether its template allows images and forks; `None` when unknown.
+    pub snapshots: Option<bool>,
+}
+
+impl MachineDetails {
+    /// `templates` is `None` when the catalog could not be read.
+    pub(crate) fn of(machine: &Machine, templates: Option<&[Template]>) -> Self {
+        let snapshots = match (templates, machine.template.as_ref()) {
+            (Some(templates), Some(template)) => Some(templates.iter().any(|candidate| {
+                candidate.id == template.id
+                    && candidate.version == template.version
+                    && candidate.has(TemplateCapability::IdentityReset)
+            })),
+            _ => None,
+        };
+        Self {
+            template: machine
+                .template
+                .as_ref()
+                .filter(|template| !template.id.is_empty())
+                .map(|template| template.label()),
+            spec: machine.spec.clone(),
+            image_id: machine
+                .image
+                .as_ref()
+                .map(|image| image.id.clone())
+                .filter(|id| !id.is_empty()),
+            forked_from: machine
+                .forked_from
+                .as_ref()
+                .map(|fork| fork.machine_id.clone())
+                .filter(|id| !id.is_empty()),
+            snapshots,
+        }
+    }
+}
+
 pub(crate) fn describe(machine: &Machine) -> String {
     let ready = match (machine.state, machine.runtime.ready) {
         (MachineState::Running, true) => ", ready",
@@ -754,6 +802,17 @@ pub(crate) fn list_images(server: &str) -> Result<Vec<Image>, HangarError> {
     Ok(images)
 }
 
+// Unit tests replace the settings workers that call these with fakes.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn list_templates(server: &str) -> Result<Vec<Template>, HangarError> {
+    hangar_client(server)?.templates()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn usage(server: &str) -> Result<Usage, HangarError> {
+    hangar_client(server)?.usage()
+}
+
 pub(crate) fn check_save(binding: &HangarBinding) -> Result<SaveCheck, HangarError> {
     check_save_with(&hangar_client(&binding.server)?, &binding.machine_id)
 }
@@ -859,6 +918,29 @@ mod tests {
     use crate::hangar::api::fake::*;
 
     const ID: &str = "m_agqp6jaaa6kqkitog6zzqzdfhy";
+
+    #[test]
+    fn machine_details_name_the_template_origin_and_snapshot_support() {
+        let mut value = machine(ID, "stopped", false);
+        value["template"] = serde_json::json!({"id": "herdr", "version": "v1", "digest": "d"});
+        value["forkedFrom"] = serde_json::json!({"machineId": "m_src", "snapshotSeq": 1});
+        value["spec"] = serde_json::json!({"vcpus": 2, "memMiB": 2048, "persistentDiskGiB": 5});
+        let listed: Machine = serde_json::from_value(value).unwrap();
+        let catalog = |capabilities: &[&str]| -> Vec<Template> {
+            vec![serde_json::from_value(template("v1", capabilities)).unwrap()]
+        };
+        let details = MachineDetails::of(&listed, Some(&catalog(&["identity-reset"])));
+        assert_eq!(details.template.as_deref(), Some("herdr@v1"));
+        assert_eq!(details.forked_from.as_deref(), Some("m_src"));
+        assert_eq!(details.image_id, None);
+        assert_eq!(details.spec.as_ref().map(|spec| spec.vcpus), Some(2));
+        assert_eq!(details.snapshots, Some(true));
+        assert_eq!(
+            MachineDetails::of(&listed, Some(&catalog(&[]))).snapshots,
+            Some(false)
+        );
+        assert_eq!(MachineDetails::of(&listed, None).snapshots, None);
+    }
 
     #[test]
     fn accepted_start_is_polled_not_resent() {

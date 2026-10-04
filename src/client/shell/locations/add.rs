@@ -1,5 +1,5 @@
 //! Add remote: a new hangar machine (sign in, then create one; existing machines are
-//! listed in Settings → remotes on their own) or a manual SSH profile. HTTP and SSH run in workers; results carry the dialog
+//! listed in Settings → Remotes on their own) or a manual SSH profile. HTTP and SSH run in workers; results carry the dialog
 //! epoch so a late result never overrides a newer dialog or selection.
 use super::*;
 use crate::client::locations::hangar::{self as machines, MachineSource};
@@ -221,8 +221,8 @@ impl AddRemoteController {
 }
 
 const EXISTING_HINT: &str =
-    "Your existing hangar machines are listed in Settings → remotes on their own.";
-const CREATE_HINT: &str = "Creates a hangar machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from Settings → remotes.";
+    "Your existing hangar machines are listed in Settings → Remotes on their own.";
+const CREATE_HINT: &str = "Creates a hangar machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from Settings → Remotes.";
 
 fn image_hint(name: &str) -> String {
     format!("Creates a hangar machine from image {name}: the packages and system configuration saved in it, with a new, empty /data (no home directory files, logins or workspace). Delete image… removes the image.")
@@ -250,12 +250,25 @@ fn list_worker(send: &mpsc::Sender<Discovery>) {
 
 impl ClientShellState {
     pub(super) fn open_add_remote(&mut self) {
-        self.locations.epoch = self.locations.epoch.wrapping_add(1);
-        let form = self.locations.add.running_form.clone().unwrap_or_default();
-        match self.location_dialog(LocationDialogKind::Add(Box::new(form))) {
+        self.open_add_remote_from(MachineSource::Template);
+    }
+
+    /// Add remote with `source` chosen (New machine from image… in the Images view).
+    pub(super) fn open_add_remote_from(&mut self, source: MachineSource) {
+        let running = self.locations.add.running_form.clone();
+        let from_image = running.is_none() && source != MachineSource::Template;
+        let mut form = running.unwrap_or_default();
+        if from_image {
+            form.source = source;
+        }
+        match self.remotes_dialog(LocationDialogKind::Add(Box::new(form))) {
             Ok(mut dialog) => {
+                self.locations.epoch = self.locations.epoch.wrapping_add(1);
                 dialog.fields = vec![TextEditor::new("", false)];
                 dialog.busy = self.locations.add.running();
+                if from_image {
+                    dialog.selected = NAME_FIELD;
+                }
                 dialog.message = if dialog.busy {
                     self.locations.add.status.clone()
                 } else {
@@ -426,7 +439,7 @@ impl ClientShellState {
         outcome.repaint = true;
         if key.code == KeyCode::Esc {
             if form.dropdown.take().is_none() {
-                self.close_location();
+                self.escape_location();
             }
             return true;
         }
@@ -505,7 +518,7 @@ impl ClientShellState {
         outcome.repaint = true;
         let point = (mouse.column, mouse.row);
         if contains(self.hits.overlay_cancel, point) {
-            self.close_location();
+            self.escape_location();
             return true;
         }
         if dialog.busy {
@@ -581,7 +594,10 @@ impl ClientShellState {
                     images,
                 } => {
                     form.apply_machines(server, list, images);
-                    dialog.message = format!("{CREATE_HINT} {EXISTING_HINT}");
+                    dialog.message = match &form.source {
+                        MachineSource::Image { name, .. } => image_hint(name),
+                        MachineSource::Template => format!("{CREATE_HINT} {EXISTING_HINT}"),
+                    };
                 }
                 Discovery::Machines {
                     server,
@@ -618,7 +634,7 @@ impl ClientShellState {
                 .and_then(|r| match r.try_recv() {
                     Ok(event) => Some(event),
                     Err(mpsc::TryRecvError::Disconnected) => Some(SetupEvent::Finished(Err(
-                        "Setup worker exited. Check Settings → remotes before retrying.".into(),
+                        "Setup worker exited. Check Settings → Remotes before retrying.".into(),
                     ))),
                     Err(mpsc::TryRecvError::Empty) => None,
                 });
@@ -883,7 +899,22 @@ mod tests {
         assert_eq!(current_form(&state).dropdown, Some((0, 0)));
         key(&mut state, KeyCode::Esc);
         assert!(state.overlay.is_some());
+        // Escape goes back to Settings → Remotes, and from there closes.
         key(&mut state, KeyCode::Esc);
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Locations(LocationDialog {
+                kind: LocationDialogKind::Manage,
+                ..
+            }))
+        ));
+        assert!(state.route_location_key(
+            &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE
+            )),
+            &mut ClientShellInput::default()
+        ));
         assert!(state.overlay.is_none());
     }
 
@@ -963,7 +994,7 @@ mod tests {
         let Some(ClientShellOverlay::Locations(dialog)) = &state.overlay else {
             panic!("dialog");
         };
-        assert!(dialog.message.contains("listed in Settings → remotes"));
+        assert!(dialog.message.contains("listed in Settings → Remotes"));
     }
 
     #[test]

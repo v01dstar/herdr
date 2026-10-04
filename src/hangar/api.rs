@@ -210,6 +210,24 @@ pub(crate) struct Machine {
     /// The machine a fork was copied from.
     #[serde(default)]
     pub forked_from: Option<ForkRef>,
+    /// Absent on servers that predate it.
+    #[serde(default)]
+    pub spec: Option<MachineSpec>,
+}
+
+/// A machine's size.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MachineSpec {
+    #[serde(default)]
+    pub vcpus: u32,
+    #[serde(default, rename = "memMiB")]
+    pub mem_mib: u64,
+    #[serde(default, rename = "persistentDiskGiB")]
+    pub persistent_disk_gib: u64,
+    /// Absent: the template's root disk size.
+    #[serde(default, rename = "rootDiskGiB")]
+    pub root_disk_gib: Option<u64>,
 }
 
 /// Guest capabilities of a template version.
@@ -259,6 +277,9 @@ pub(crate) struct Image {
     pub template: TemplateRef,
     #[serde(default)]
     pub root_size_bytes: u64,
+    /// Stored bytes only this image references; absent before a usage run counted it.
+    #[serde(default)]
+    pub exclusive_bytes: Option<u64>,
     /// RFC 3339.
     #[serde(default)]
     pub created_at: String,
@@ -268,6 +289,39 @@ pub(crate) struct Image {
 struct ImageList {
     #[serde(default)]
     images: Vec<Image>,
+}
+
+/// Storage usage and limits of the caller (`GET /v1/usage`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Usage {
+    /// RFC 3339 time of the usage run the byte figures come from; `None` before one
+    /// included the caller.
+    #[serde(default)]
+    pub computed_at: Option<String>,
+    #[serde(default)]
+    pub logical_bytes: u64,
+    #[serde(default)]
+    pub stored_bytes: u64,
+    #[serde(default)]
+    pub exclusive_bytes: u64,
+    #[serde(default)]
+    pub machines: u64,
+    #[serde(default)]
+    pub images: u64,
+    #[serde(default)]
+    pub limits: UsageLimits,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsageLimits {
+    #[serde(default)]
+    pub max_machines: u64,
+    #[serde(default)]
+    pub max_images: u64,
+    #[serde(default, rename = "maxStoredGiB")]
+    pub max_stored_gib: u64,
 }
 
 #[derive(Serialize)]
@@ -454,7 +508,7 @@ impl HangarError {
 }
 
 pub(crate) const SIGN_IN_HINT: &str =
-    "Sign in to hangar from Settings → remotes → hangar account, or run `hangar login`.";
+    "Sign in to hangar from Settings → Remotes → Account, or run `hangar login`.";
 
 impl std::fmt::Display for HangarError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -906,6 +960,11 @@ impl Client {
         Ok(list.images)
     }
 
+    /// The caller's storage usage and limits.
+    pub(crate) fn usage(&self) -> Result<Usage, HangarError> {
+        self.call("GET", "/v1/usage", None, None, true)
+    }
+
     /// Saves a stopped, synced machine's root disk as an image. Synchronous.
     pub(crate) fn create_image(
         &self,
@@ -1305,6 +1364,41 @@ mod tests {
         assert_eq!(template.capabilities[1], TemplateCapability::Unknown);
         let image: Image = serde_json::from_value(image("im_a", "base", "m_a")).unwrap();
         assert_eq!(image.template.label(), "herdr@2026-10-03.2");
+    }
+
+    #[test]
+    fn usage_spec_and_image_sizes_decode() {
+        let http = FakeHttp::new();
+        http.reply(
+            200,
+            serde_json::json!({
+                "computedAt": "2026-10-03T08:00:00Z", "logicalBytes": 10, "storedBytes": 2147483648u64,
+                "exclusiveBytes": 1, "machines": 3, "images": 2,
+                "limits": {"maxMachines": 5, "maxImages": 10, "maxStoredGiB": 20}
+            }),
+        );
+        let usage = client(&http).usage().unwrap();
+        assert_eq!(http.paths(), ["GET /v1/usage"]);
+        assert_eq!(usage.stored_bytes, 2 << 30);
+        assert_eq!(usage.limits.max_stored_gib, 20);
+        assert_eq!(usage.limits.max_images, 10);
+        let never: Usage = serde_json::from_value(serde_json::json!({"computedAt": null})).unwrap();
+        assert_eq!(never.computed_at, None);
+        let machine: Machine = serde_json::from_value(serde_json::json!({
+            "id": "m_a", "name": "a", "state": "running",
+            "spec": {"vcpus": 2, "memMiB": 4096, "persistentDiskGiB": 20, "rootDiskGiB": 8}
+        }))
+        .unwrap();
+        let spec = machine.spec.unwrap();
+        assert_eq!((spec.vcpus, spec.mem_mib), (2, 4096));
+        assert_eq!(
+            (spec.persistent_disk_gib, spec.root_disk_gib),
+            (20, Some(8))
+        );
+        let mut value = image("im_a", "base", "m_a");
+        value["exclusiveBytes"] = 512.into();
+        let image: Image = serde_json::from_value(value).unwrap();
+        assert_eq!(image.exclusive_bytes, Some(512));
     }
 
     #[test]

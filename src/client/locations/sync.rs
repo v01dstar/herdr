@@ -23,7 +23,7 @@ use crate::hangar::binding::{is_machine_id, HangarBinding};
 const CACHE_VERSION: u32 = 1;
 /// Discovery of machines created or deleted elsewhere.
 pub(crate) const BACKGROUND_INTERVAL: Duration = Duration::from_secs(10 * 60);
-/// While Settings → remotes is open.
+/// While Settings → Remotes is open.
 pub(crate) const SETTINGS_INTERVAL: Duration = Duration::from_secs(15);
 /// At most one classification sync per server after connection failures.
 const FAILURE_SYNC_INTERVAL: Duration = Duration::from_secs(15);
@@ -500,15 +500,29 @@ pub(crate) fn sync_with(servers: &[String], fetch: Fetch<'_>) -> SyncReport {
 
 /// One sync of every server. Blocks on HTTP: worker threads only.
 pub(crate) fn sync_now() -> SyncReport {
+    sync_now_listing().0
+}
+
+/// One sync of every server, also returning each successful listing as hangar sent it
+/// (for details the cached list does not keep). Blocks on HTTP: worker threads only.
+pub(crate) fn sync_now_listing() -> (SyncReport, BTreeMap<String, Vec<Machine>>) {
     let cache = MachineCache::load().unwrap_or_else(|error| {
         tracing::debug!(%error, "hangar machine list unreadable; syncing from scratch");
         MachineCache::default()
     });
     let servers = servers_to_sync(&cache);
     if servers.is_empty() {
-        return SyncReport::default();
+        return (SyncReport::default(), BTreeMap::new());
     }
-    sync_with(&servers, &|server| super::hangar::list_machines(server))
+    let listed = Mutex::new(BTreeMap::new());
+    let report = sync_with(&servers, &|server| {
+        let result = super::hangar::list_machines(server);
+        if let (Ok(machines), Ok(mut listed)) = (&result, listed.lock()) {
+            listed.insert(server.to_owned(), machines.clone());
+        }
+        result
+    });
+    (report, listed.into_inner().unwrap_or_default())
 }
 
 /// Edits the cached entry of one machine. Callers hold `operation_lock`.

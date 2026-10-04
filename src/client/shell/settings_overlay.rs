@@ -1,5 +1,8 @@
 use super::*;
 
+/// Height of the settings popup on every tab (the Integrations tab grows with its list).
+pub(in crate::client::shell) const SETTINGS_HEIGHT: u16 = 24;
+
 fn choice_style(selected: bool, palette: &Palette) -> Style {
     if selected {
         Style::default()
@@ -43,9 +46,9 @@ pub(in crate::client::shell) fn render_settings_overlay(
         .saturating_add(settings.integrations.len().max(1) as u16)
         .saturating_add(settings.integration_messages.len().min(6) as u16);
     let height = if settings.section == ClientSettingsSection::Integrations {
-        integration_height.max(22)
+        integration_height.max(SETTINGS_HEIGHT)
     } else {
-        22
+        SETTINGS_HEIGHT
     };
     let popup = popup(buffer.area, 76, height)?;
     let inner = panel(buffer, popup, palette.accent, palette.panel_bg)?;

@@ -1,44 +1,24 @@
 use super::*;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
 use crate::client::locations::hangar::{
-    SaveCheck, SavePlan, SnapshotUse, FORK_CONTENTS, IMAGE_CONTENTS,
+    MachineDetails, SaveCheck, SavePlan, SnapshotUse, FORK_CONTENTS, IMAGE_CONTENTS,
 };
 use crate::client::locations::{self as backend, LocationPreferences, RemoteOptions};
 use crate::hangar::api::MachineState;
 use crate::hangar::auth::AccountStatus;
 use crate::hangar::binding::HangarBinding;
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(super) mod account;
 pub(super) mod add;
-
-// Rows of the remotes list (Settings → remotes), in `LocationDialog::labels` order: the
-// account, adding a remote, then the remote selector and actions on the selected remote
-// (lifecycle, connection, copies, removal).
-/// Opens the hangar account dialog (sign in, sign out).
-const ACCOUNT_ROW: usize = 0;
-const ADD_ROW: usize = 1;
-/// Chooses the remote the rows below act on.
-const LOCATION_ROW: usize = 2;
-const STATUS_ROW: usize = 3;
-const START_ROW: usize = 4;
-const SUSPEND_ROW: usize = 5;
-const STOP_ROW: usize = 6;
-const TEST_ROW: usize = 7;
-const EDIT_ROW: usize = 8;
-const DEFAULT_ROW: usize = 9;
-const SAVE_IMAGE_ROW: usize = 10;
-const FORK_ROW: usize = 11;
-/// Delete machine… for a hangar machine; Remove remote for an SSH remote.
-const REMOVE_REMOTE_ROW: usize = 12;
-/// Hide from sidebar / Show in sidebar, for a hangar machine.
-const HIDE_ROW: usize = 13;
+pub(in crate::client::shell) mod view;
+use view::{RemoteAction, RemotesView};
 
 #[derive(Debug)]
 pub(super) enum LocationDialogKind {
+    /// Settings → Remotes; the forms and confirmations below it return here.
     Manage,
     Add(Box<add::AddRemoteForm>),
     Edit(Option<ProfileId>),
@@ -48,8 +28,6 @@ pub(super) enum LocationDialogKind {
     Delete(Box<DeleteRequest>),
     SaveImage(Box<SaveImageRequest>),
     DeleteImage(Box<ImageDeleteRequest>),
-    /// The hangar sign-in shared with the hangar CLI.
-    Account,
     /// Confirms Sign out….
     SignOut,
     Fork(Box<ForkRequest>),
@@ -134,7 +112,7 @@ impl ForkRequest {
     }
 }
 
-/// Delete image… from Add remote's source picker.
+/// Delete image… from the Images view or Add remote's source picker.
 #[derive(Clone, Debug)]
 pub(super) struct ImageDeleteRequest {
     pub server: String,
@@ -171,6 +149,9 @@ pub(super) struct LocationDialog {
     /// Last known hangar sign-in; presentation only, refreshed by a worker. `None`
     /// while it is being checked.
     pub account: Option<AccountStatus>,
+    /// Settings → Remotes: sub-view, selection and fetched data. Kept while a form or
+    /// confirmation opened from it is shown.
+    pub view: Box<RemotesView>,
 }
 
 impl LocationDialog {
@@ -185,7 +166,6 @@ impl LocationDialog {
             LocationDialogKind::Delete(_) => "delete machine",
             LocationDialogKind::SaveImage(_) => "save as image",
             LocationDialogKind::DeleteImage(_) => "delete image",
-            LocationDialogKind::Account => "hangar account",
             LocationDialogKind::SignOut => "sign out of hangar",
             LocationDialogKind::Fork(_) => "fork machine",
         }
@@ -193,30 +173,14 @@ impl LocationDialog {
     pub fn labels(&self) -> &[&str] {
         match self.kind {
             LocationDialogKind::Add(_) => &["Provider", "Machine", "Name", "Source", ""],
-            LocationDialogKind::Manage => &[
-                "hangar account…",
-                "Add remote",
-                "Remote",
-                "Machine status",
-                "Start remote",
-                "Suspend remote…",
-                "Stop machine…",
-                "Test connection",
-                "Edit remote",
-                "Use as default",
-                "Save as image…",
-                "Fork machine…",
-                "Delete machine…",
-                "Hide from sidebar",
-            ],
-            LocationDialogKind::Account => &account::ROWS,
             LocationDialogKind::Edit(_) => {
                 &["Name", "SSH target", "Herdr session", "Default directory"]
             }
             LocationDialogKind::New => &["Name", "Location", "Directory"],
             LocationDialogKind::SaveImage(_) => &["Image name", "Description"],
             LocationDialogKind::Fork(_) => &["Name"],
-            LocationDialogKind::Stop
+            LocationDialogKind::Manage
+            | LocationDialogKind::Stop
             | LocationDialogKind::Suspend
             | LocationDialogKind::Delete(_)
             | LocationDialogKind::DeleteImage(_)
@@ -234,55 +198,6 @@ impl LocationDialog {
             .copied()
     }
 
-    /// Whether the selected remote is a hangar machine.
-    fn hangar_selected(&self) -> bool {
-        self.profile()
-            .is_some_and(|profile| self.prefs.binding(&profile.id).is_some())
-    }
-
-    /// Row text; Start remote reads Resume remote for a suspended machine, the account
-    /// row names who is signed in, removal names what it does for the selected remote,
-    /// and Hide reads Show for a hidden machine.
-    pub fn row_label(&self, index: usize) -> Cow<'_, str> {
-        if matches!(self.kind, LocationDialogKind::Manage) {
-            if index == REMOVE_REMOTE_ROW && self.profile().is_some() && !self.hangar_selected() {
-                return "Remove remote".into();
-            }
-            if index == HIDE_ROW
-                && self
-                    .profile()
-                    .is_some_and(|profile| self.hidden.contains(&profile.id))
-            {
-                return "Show in sidebar".into();
-            }
-            if index == START_ROW && self.machine_state() == Some(MachineState::Suspended) {
-                return "Resume remote".into();
-            }
-            if index == ACCOUNT_ROW {
-                return account::manage_row_label(self.account.as_ref());
-            }
-        }
-        self.labels().get(index).copied().unwrap_or("").into()
-    }
-
-    /// The text below the rows; the account dialog leads with who is signed in.
-    pub fn body(&self) -> Cow<'_, str> {
-        match self.kind {
-            LocationDialogKind::Account => {
-                account::body(self.account.as_ref(), &self.message).into()
-            }
-            _ => self.message.as_str().into(),
-        }
-    }
-
-    /// Plain rows that act when clicked or entered (no text fields).
-    pub fn action_rows(&self) -> bool {
-        matches!(
-            self.kind,
-            LocationDialogKind::Manage | LocationDialogKind::Account
-        )
-    }
-
     pub fn profile(&self) -> Option<&SavedSshEndpoint> {
         self.location
             .checked_sub(1)
@@ -298,6 +213,9 @@ impl LocationDialog {
                 .retain(|profile| !hidden.contains(&profile.id));
         }
         self.prefs = snapshot.prefs;
+        if let Some(details) = snapshot.details {
+            self.view.details.extend(details);
+        }
         self.machine_states = snapshot.machine_states;
         self.hidden = snapshot.hidden;
         self.sync_notes = snapshot.sync_notes;
@@ -347,8 +265,7 @@ impl LocationDialog {
             .unwrap_or_else(|| "Local".into())
     }
     pub fn choice_field(&self, index: usize) -> bool {
-        matches!(self.kind, LocationDialogKind::Manage) && index == LOCATION_ROW
-            || matches!(self.kind, LocationDialogKind::New) && index == 1
+        matches!(self.kind, LocationDialogKind::New) && index == 1
     }
     pub fn cycle_location(&mut self, delta: isize) {
         self.location_missing = false;
@@ -373,7 +290,6 @@ impl LocationDialog {
                     | LocationDialogKind::Suspend
                     | LocationDialogKind::Delete(_)
                     | LocationDialogKind::DeleteImage(_)
-                    | LocationDialogKind::Account
                     | LocationDialogKind::SignOut
             )
         {
@@ -449,10 +365,21 @@ pub(super) struct LocationController {
     /// When the remotes dialog last asked for a sync.
     last_sync: Option<Instant>,
     image_check: Option<(u64, mpsc::Receiver<Result<SaveCheck, String>>)>,
+    /// The images listing and usage read for Settings → Remotes.
+    images: Option<(u64, mpsc::Receiver<Result<view::ImageList, String>>)>,
+    usage: Option<(
+        u64,
+        mpsc::Receiver<Result<crate::hangar::api::Usage, String>>,
+    )>,
     /// Replaces the hangar request behind Save as image's and Fork machine's check in
     /// tests.
     save_checker: Option<SaveChecker>,
+    /// Replaces the on-disk check that the selected remote is unchanged in tests.
+    binding_validator: Option<BindingValidator>,
 }
+
+type BindingValidator =
+    fn(&SavedSshEndpoint, Option<&crate::client::locations::CloudBinding>) -> Result<(), String>;
 
 type SaveChecker = fn(&HangarBinding) -> Result<SaveCheck, crate::hangar::api::HangarError>;
 
@@ -466,14 +393,32 @@ pub(super) struct RemotesSnapshot {
     sync_notes: BTreeMap<ProfileId, &'static str>,
     /// Shown when the list may be outdated.
     notice: Option<String>,
+    /// Machine details from the fetch behind this snapshot; `None` when nothing was
+    /// fetched.
+    details: Option<BTreeMap<(String, String), MachineDetails>>,
 }
 
-/// Fetches every server's machine list, then reloads the remotes.
+/// Fetches every server's machine list (and template catalog, to tell which machines
+/// can be saved or forked), then reloads the remotes.
 #[cfg(not(test))]
 fn sync_and_load() -> Result<RemotesSnapshot, String> {
-    let report = backend::sync::sync_now();
+    let (report, listed) = backend::sync::sync_now_listing();
     tracing::debug!(?report, "synced hangar machines for settings");
-    RemotesSnapshot::load()
+    let mut details = BTreeMap::new();
+    for (server, machines) in &listed {
+        let templates = backend::hangar::list_templates(server)
+            .map_err(|error| tracing::debug!(%error, "could not read hangar templates"))
+            .ok();
+        for machine in machines {
+            details.insert(
+                (server.clone(), machine.id.clone()),
+                MachineDetails::of(machine, templates.as_deref()),
+            );
+        }
+    }
+    let mut snapshot = RemotesSnapshot::load()?;
+    snapshot.details = Some(details);
+    Ok(snapshot)
 }
 
 /// Unit tests never reach a real hangar server; sync itself is tested with fake HTTP.
@@ -523,6 +468,7 @@ impl RemotesSnapshot {
                 .filter_map(|remote| Some((remote.profile.id.clone(), remote.sync.note()?)))
                 .collect(),
             notice,
+            details: None,
         }
     }
 
@@ -556,7 +502,55 @@ impl ClientShellState {
             hidden: snapshot.hidden,
             sync_notes: snapshot.sync_notes,
             account: self.locations.account.last_status(),
+            view: Box::default(),
         })
+    }
+
+    /// A dialog of Settings → Remotes that keeps the current one's view and selected
+    /// remote (none when opened afresh).
+    fn remotes_dialog(&mut self, kind: LocationDialogKind) -> Result<LocationDialog, String> {
+        let carried = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Locations(dialog))
+                if !matches!(dialog.kind, LocationDialogKind::New) =>
+            {
+                Some((dialog.view.clone(), dialog.profile().map(|p| p.id.clone())))
+            }
+            _ => None,
+        };
+        let mut dialog = self.location_dialog(kind)?;
+        if let Some((view, selected)) = carried {
+            dialog.view = view;
+            dialog.location = selected
+                .and_then(|id| dialog.profiles.iter().position(|p| p.id == id))
+                .map_or(0, |index| index + 1);
+        }
+        Ok(dialog)
+    }
+
+    /// Closes a form or confirmation opened from Settings → Remotes and shows the view
+    /// as it was; elsewhere (New workspace) closes the dialog.
+    pub(super) fn escape_location(&mut self) {
+        let returns = matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Locations(ref dialog))
+                if !matches!(dialog.kind, LocationDialogKind::Manage | LocationDialogKind::New)
+        );
+        if !returns {
+            self.close_location();
+            return;
+        }
+        self.locations.add.cancel_sign_in();
+        let busy = self.locations.job.is_some();
+        if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+            dialog.kind = LocationDialogKind::Manage;
+            dialog.fields.clear();
+            dialog.selected = 0;
+            dialog.busy = busy;
+            if !busy {
+                dialog.message.clear();
+            }
+        }
+        self.refresh_remote_connections();
     }
 
     pub(super) fn open_locations(&mut self) {
@@ -568,16 +562,16 @@ impl ClientShellState {
             self.set_endpoint_error("A remote operation is still running");
             return;
         }
-        self.locations.epoch = self.locations.epoch.wrapping_add(1);
-        match self.location_dialog(LocationDialogKind::Manage) {
+        match self.remotes_dialog(LocationDialogKind::Manage) {
             Ok(mut dialog) => {
-                dialog.message = LocationPreferences::take_notice().unwrap_or_else(|| {
-                    "Press ↵ on Remote to choose a remote. hangar machines are listed from your hangar account and update on their own; Delete machine… deletes one after you confirm."
-                        .into()
-                });
+                self.locations.epoch = self.locations.epoch.wrapping_add(1);
+                dialog.message = LocationPreferences::take_notice().unwrap_or_default();
+                let tab = dialog.view.tab;
                 self.overlay = Some(ClientShellOverlay::Locations(dialog));
+                self.locations.sync = None;
                 self.sync_machines();
                 self.refresh_account();
+                self.switch_remotes_tab(tab);
             }
             Err(error) => self.set_endpoint_error(error),
         }
@@ -593,6 +587,7 @@ impl ClientShellState {
             return;
         }
         self.locations.last_sync = Some(Instant::now());
+        self.refresh_remote_connections();
         let (send, receive) = mpsc::channel();
         self.locations.sync = Some((self.locations.epoch, receive));
         std::thread::spawn(move || {
@@ -639,7 +634,7 @@ impl ClientShellState {
 
     fn edit_location(&mut self, id: Option<ProfileId>) {
         let result = (|| {
-            let mut dialog = self.location_dialog(LocationDialogKind::Edit(id.clone()))?;
+            let mut dialog = self.remotes_dialog(LocationDialogKind::Edit(id.clone()))?;
             let profile = id
                 .as_ref()
                 .and_then(|id| dialog.profiles.iter().find(|p| &p.id == id));
@@ -841,11 +836,6 @@ impl ClientShellState {
                 self.submit_save_image(request);
                 Ok(())
             }
-            LocationDialogKind::Account => {
-                let selected = dialog.selected;
-                self.accept_account(selected);
-                Ok(())
-            }
             LocationDialogKind::SignOut => {
                 self.location_job(|| backend::hangar::sign_out().map(JobResult::Message));
                 Ok(())
@@ -872,48 +862,8 @@ impl ClientShellState {
                 Ok(())
             }
             LocationDialogKind::Manage => {
-                let selected = dialog.selected;
-                match selected {
-                    LOCATION_ROW => {
-                        if let Some(ClientShellOverlay::Locations(d)) = self.overlay.as_mut() {
-                            d.cycle_location(1);
-                        }
-                        Ok(())
-                    }
-                    ADD_ROW => {
-                        self.open_add_remote();
-                        Ok(())
-                    }
-                    ACCOUNT_ROW => {
-                        self.open_account();
-                        Ok(())
-                    }
-                    DEFAULT_ROW => {
-                        let result = (|| {
-                            let _guard = backend::operation_lock()?;
-                            if let Some(profile) = &profile {
-                                backend::validate_binding(profile, options.cloud.as_ref())?;
-                            }
-                            let mut prefs = LocationPreferences::load()?;
-                            prefs.default_profile = profile.as_ref().map(|p| p.id.clone());
-                            prefs.store()
-                        })();
-                        if result.is_ok() {
-                            if let Some(ClientShellOverlay::Locations(d)) = self.overlay.as_mut() {
-                                d.message =
-                                    format!("New workspace defaults to {}", d.location_label());
-                            }
-                        }
-                        result
-                    }
-                    _ => {
-                        if let Some(profile) = profile {
-                            self.remote_location_action(selected, profile, options)
-                        } else {
-                            Err("Select a remote location first".into())
-                        }
-                    }
-                }
+                self.activate_remotes(outcome);
+                Ok(())
             }
         };
         if let Err(error) = result {
@@ -925,16 +875,20 @@ impl ClientShellState {
 
     fn remote_location_action(
         &mut self,
-        action: usize,
+        action: RemoteAction,
         profile: SavedSshEndpoint,
         options: RemoteOptions,
     ) -> Result<(), String> {
-        backend::validate_binding(&profile, options.cloud.as_ref())?;
+        let validate = self
+            .locations
+            .binding_validator
+            .unwrap_or(backend::validate_binding);
+        validate(&profile, options.cloud.as_ref())?;
         match action {
-            EDIT_ROW => self.edit_location(Some(profile.id)),
-            TEST_ROW => {
+            RemoteAction::Edit => self.edit_location(Some(profile.id)),
+            RemoteAction::Test => {
                 if !profile.enabled {
-                    return Err("Remote is disabled. Use Start remote before testing SSH.".into());
+                    return Err("Remote is disabled. Start it before testing SSH.".into());
                 }
                 self.location_job(move || {
                     crate::remote::check_saved_ssh(&profile.target, &profile.session)
@@ -942,7 +896,7 @@ impl ClientShellState {
                         .map_err(|error| error.to_string())
                 });
             }
-            STATUS_ROW => {
+            RemoteAction::Status => {
                 if options.cloud.is_none() {
                     return Err("This remote has no hangar machine".into());
                 }
@@ -950,7 +904,7 @@ impl ClientShellState {
                     backend::machine_status(&options).map(JobResult::Message)
                 });
             }
-            START_ROW => {
+            RemoteAction::Start => {
                 let resuming = matches!(
                     self.overlay.as_ref(),
                     Some(ClientShellOverlay::Locations(dialog))
@@ -966,7 +920,7 @@ impl ClientShellState {
                     }))
                 })
             }
-            SUSPEND_ROW => {
+            RemoteAction::Suspend => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Suspend remote requires a hangar machine.".into());
                 };
@@ -974,10 +928,10 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                     dialog.kind = LocationDialogKind::Suspend;
                     dialog.selected = 0;
-                    dialog.message = format!("Suspend hangar machine {name}? Its memory is saved to a snapshot, so running programs and Herdr sessions continue after Resume remote. (Stop machine… shuts everything down instead; only files on disk remain.) It does not reconnect until it is resumed.");
+                    dialog.message = format!("Suspend hangar machine {name}? Its memory is saved to a snapshot, so running programs and Herdr sessions continue after Resume. (Stop machine… shuts everything down instead; only files on disk remain.) It does not reconnect until it is resumed.");
                 }
             }
-            STOP_ROW => {
+            RemoteAction::Stop => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Stop machine requires a hangar machine. Manage SSH-only server lifetime on its host.".into());
                 };
@@ -985,10 +939,10 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                     dialog.kind = LocationDialogKind::Stop;
                     dialog.selected = 0;
-                    dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend remote… keeps them). It does not reconnect until it is started again.");
+                    dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend… keeps them). It does not reconnect until it is started again.");
                 }
             }
-            SAVE_IMAGE_ROW => {
+            RemoteAction::SaveImage => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Save as image requires a hangar machine.".into());
                 };
@@ -1002,7 +956,7 @@ impl ClientShellState {
                 });
                 self.check_save_image();
             }
-            FORK_ROW => {
+            RemoteAction::Fork => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Fork machine requires a hangar machine.".into());
                 };
@@ -1016,7 +970,7 @@ impl ClientShellState {
                 });
                 self.check_save_image();
             }
-            REMOVE_REMOTE_ROW => match options.cloud.clone() {
+            RemoteAction::Remove => match options.cloud.clone() {
                 Some(cloud) => self.confirm_delete(DeleteRequest {
                     binding: cloud.hangar().clone(),
                     profile,
@@ -1027,7 +981,7 @@ impl ClientShellState {
                     self.open_locations();
                 }
             },
-            HIDE_ROW => {
+            RemoteAction::Hide => {
                 let Some(cloud) = options.cloud.as_ref() else {
                     return Err("Hide from sidebar applies to hangar machines. An SSH remote can be removed, or disabled with `herdr machine disable`.".into());
                 };
@@ -1046,7 +1000,7 @@ impl ClientShellState {
                     };
                 }
             }
-            _ => {}
+            RemoteAction::Default => {}
         }
         Ok(())
     }
@@ -1221,7 +1175,7 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if self.route_add_remote_key(key, outcome) {
+        if self.route_add_remote_key(key, outcome) || self.route_remotes_key(key, outcome) {
             return true;
         }
         let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
@@ -1229,7 +1183,7 @@ impl ClientShellState {
         };
         outcome.repaint = true;
         if key.code == KeyCode::Esc {
-            self.close_location();
+            self.escape_location();
             return true;
         }
         if dialog.busy {
@@ -1242,12 +1196,6 @@ impl ClientShellState {
             KeyCode::BackTab | KeyCode::Up => {
                 dialog.selected =
                     (dialog.selected + dialog.labels().len()) % (dialog.labels().len() + 1)
-            }
-            // The remotes list is the Settings → Remotes tab: ←/→ always move between tabs,
-            // like the other tabs, so holding an arrow key keeps cycling. Enter or a click
-            // cycles the Location row.
-            KeyCode::Left | KeyCode::Right if matches!(dialog.kind, LocationDialogKind::Manage) => {
-                self.move_from_remotes_tab(if key.code == KeyCode::Left { -1 } else { 1 }, outcome)
             }
             KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
                 dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
@@ -1306,6 +1254,7 @@ impl ClientShellState {
     pub(crate) fn tick_locations(&mut self, outcome: &mut ClientShellInput) {
         self.tick_add_remote(outcome);
         self.tick_account(outcome);
+        self.tick_remotes_view(outcome);
         let synced =
             self.locations
                 .sync
@@ -1405,6 +1354,7 @@ impl ClientShellState {
         let mut refresh_states = false;
         let mut recheck_image = false;
         let mut refresh_account = false;
+        let mut refresh_images = false;
         if let Some((epoch, result)) = received {
             self.locations.job = None;
             let succeeded = result.is_ok();
@@ -1472,22 +1422,30 @@ impl ClientShellState {
                             recheck_image = true;
                         }
                     }
+                    if matches!(dialog.kind, LocationDialogKind::SignOut) {
+                        dialog.account = None;
+                        dialog.view.usage = None;
+                        dialog.view.images = None;
+                        refresh_account = true;
+                    }
+                    if succeeded && matches!(dialog.kind, LocationDialogKind::DeleteImage(_)) {
+                        refresh_images = true;
+                    }
                     if saved
                         || matches!(
                             dialog.kind,
-                            LocationDialogKind::Delete(_) | LocationDialogKind::DeleteImage(_)
+                            LocationDialogKind::Stop
+                                | LocationDialogKind::Suspend
+                                | LocationDialogKind::Delete(_)
+                                | LocationDialogKind::DeleteImage(_)
+                                | LocationDialogKind::SignOut
                         )
                     {
-                        // A finished delete, save or fork never stays armed for a second
-                        // Enter.
+                        // A finished confirmation, save or fork never stays armed for a
+                        // second Enter: the view is shown again as it was.
                         dialog.kind = LocationDialogKind::Manage;
+                        dialog.fields.clear();
                         dialog.selected = 0;
-                    }
-                    if matches!(dialog.kind, LocationDialogKind::SignOut) {
-                        dialog.kind = LocationDialogKind::Account;
-                        dialog.selected = 0;
-                        dialog.account = None;
-                        refresh_account = true;
                     }
                     if let Ok(snapshot) = RemotesSnapshot::load() {
                         dialog.apply_snapshot(snapshot);
@@ -1509,6 +1467,10 @@ impl ClientShellState {
         }
         if refresh_account {
             self.refresh_account();
+        }
+        if refresh_images {
+            self.locations.images = None;
+            self.request_images();
         }
         let owns_new_dialog = matches!(
             self.overlay,
@@ -1618,6 +1580,7 @@ mod tests {
             hidden: BTreeSet::new(),
             sync_notes: BTreeMap::new(),
             account: None,
+            view: Box::default(),
         }
     }
 
@@ -1625,15 +1588,15 @@ mod tests {
         ClientShellState::new(ClientShellConfig::from_config(&Config::default()))
     }
 
-    const MACHINE: &str = "m_agqp6jaaa6kqkitog6zzqzdfhy";
+    pub(super) const MACHINE: &str = "m_agqp6jaaa6kqkitog6zzqzdfhy";
 
     /// A Manage dialog with the running hangar machine `box` (selected), listed as the
     /// remotes view builds it, and the SSH remote `Remote A`.
-    fn hangar_dialog() -> LocationDialog {
+    pub(super) fn hangar_dialog() -> LocationDialog {
         hangar_dialog_with(MachineState::Running, false)
     }
 
-    fn hangar_snapshot(state: MachineState, hidden: bool) -> RemotesSnapshot {
+    pub(super) fn hangar_snapshot(state: MachineState, hidden: bool) -> RemotesSnapshot {
         use crate::client::locations::sync::{CachedMachine, MachineCache};
         let plain = dialog().profiles.remove(0);
         let mut cache = MachineCache::default();
@@ -1665,7 +1628,7 @@ mod tests {
         RemotesSnapshot::from_remotes(&remotes)
     }
 
-    fn hangar_dialog_with(state: MachineState, hidden: bool) -> LocationDialog {
+    pub(super) fn hangar_dialog_with(state: MachineState, hidden: bool) -> LocationDialog {
         let mut dialog = dialog();
         dialog.kind = LocationDialogKind::Manage;
         dialog.apply_snapshot(hangar_snapshot(state, hidden));
@@ -1676,71 +1639,30 @@ mod tests {
     }
 
     #[test]
-    fn arrows_on_the_remotes_tab_keep_cycling_settings_tabs() {
-        for selected in [ACCOUNT_ROW, LOCATION_ROW] {
-            let mut state = shell();
-            let mut manage = dialog();
-            manage.kind = LocationDialogKind::Manage;
-            manage.selected = selected;
-            state.overlay = Some(ClientShellOverlay::Locations(manage));
-            state.route_location_key(
-                &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
-                    KeyCode::Right,
-                    crossterm::event::KeyModifiers::NONE,
-                )),
-                &mut ClientShellInput::default(),
-            );
-            assert!(matches!(
-                state.overlay,
-                Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-                    section: ClientSettingsSection::Theme,
-                    ..
-                }))
-            ));
-        }
-    }
-
-    #[test]
-    fn remote_list_row_constants_match_their_labels() {
-        let dialog = hangar_dialog();
-        let labels = dialog.labels();
-        for (row, label) in [
-            (ACCOUNT_ROW, "hangar account…"),
-            (ADD_ROW, "Add remote"),
-            (LOCATION_ROW, "Remote"),
-            (EDIT_ROW, "Edit remote"),
-            (TEST_ROW, "Test connection"),
-            (DEFAULT_ROW, "Use as default"),
-            (STATUS_ROW, "Machine status"),
-            (START_ROW, "Start remote"),
-            (SUSPEND_ROW, "Suspend remote…"),
-            (STOP_ROW, "Stop machine…"),
-            (SAVE_IMAGE_ROW, "Save as image…"),
-            (FORK_ROW, "Fork machine…"),
-            (REMOVE_REMOTE_ROW, "Delete machine…"),
-            (HIDE_ROW, "Hide from sidebar"),
-        ] {
-            assert_eq!(labels[row], label);
-            assert_eq!(dialog.row_label(row), label);
-        }
-        assert_eq!(labels.len(), HIDE_ROW + 1);
-    }
-
-    #[test]
     fn hangar_machines_offer_delete_and_hide_while_ssh_remotes_offer_remove() {
+        let label = |dialog: &LocationDialog, action| {
+            dialog
+                .actions()
+                .into_iter()
+                .find(|entry| entry.action == action)
+                .map(|entry| entry.label)
+        };
         let mut dialog = hangar_dialog();
         assert_eq!(dialog.profile().unwrap().label, "box");
-        assert_eq!(dialog.row_label(REMOVE_REMOTE_ROW), "Delete machine…");
-        assert_eq!(dialog.row_label(HIDE_ROW), "Hide from sidebar");
-        assert!(!dialog
-            .labels()
-            .iter()
-            .any(|label| label.contains("Remove profile")));
+        assert_eq!(
+            label(&dialog, RemoteAction::Remove),
+            Some("Delete machine…")
+        );
+        assert_eq!(
+            label(&dialog, RemoteAction::Hide),
+            Some("Hide from sidebar")
+        );
         dialog.location = 1;
         assert_eq!(dialog.profile().unwrap().label, "Remote A");
-        assert_eq!(dialog.row_label(REMOVE_REMOTE_ROW), "Remove remote");
+        assert_eq!(label(&dialog, RemoteAction::Remove), Some("Remove remote"));
+        assert_eq!(label(&dialog, RemoteAction::Hide), None);
         let hidden = hangar_dialog_with(MachineState::Running, true);
-        assert_eq!(hidden.row_label(HIDE_ROW), "Show in sidebar");
+        assert_eq!(label(&hidden, RemoteAction::Hide), Some("Show in sidebar"));
         assert!(
             hidden.location_label().ends_with("· hidden"),
             "{}",
@@ -1757,12 +1679,11 @@ mod tests {
         let mut state = shell();
         let mut dialog = hangar_dialog();
         dialog.location = 1;
-        dialog.selected = HIDE_ROW;
         let profile = dialog.profiles[0].clone();
         let options = dialog.prefs.remotes[&profile.id].clone();
         state.overlay = Some(ClientShellOverlay::Locations(dialog));
         let error = state
-            .remote_location_action(HIDE_ROW, profile, options)
+            .remote_location_action(RemoteAction::Hide, profile, options)
             .unwrap_err();
         // Validation of the remote runs against disk first; either refusal is fine,
         // but nothing is hidden or removed.
@@ -1874,12 +1795,13 @@ mod tests {
 
     #[test]
     fn save_as_image_sits_with_fork_and_states_what_is_saved() {
-        let dialog = hangar_dialog();
-        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW - 1), "Use as default");
-        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW), "Save as image…");
-        assert_eq!(dialog.row_label(SAVE_IMAGE_ROW + 1), "Fork machine…");
-        assert_eq!(dialog.row_label(FORK_ROW), "Fork machine…");
-        assert_eq!(dialog.row_label(FORK_ROW + 1), "Delete machine…");
+        let copies = hangar_dialog()
+            .actions()
+            .into_iter()
+            .filter(|entry| entry.group == view::ActionGroup::Copy)
+            .map(|entry| entry.label)
+            .collect::<Vec<_>>();
+        assert_eq!(copies, ["Save as image…", "Fork…"]);
         let mut state = save_image_shell(None);
         let (dialog, request) = save_request(&state);
         assert_eq!(dialog.labels(), ["Image name", "Description"]);
@@ -2141,8 +2063,9 @@ mod tests {
     #[test]
     fn a_suspended_machine_offers_resume_and_is_labelled_suspended() {
         let mut state = shell();
+        let start = |dialog: &LocationDialog| dialog.actions()[0].clone();
         let dialog = hangar_dialog_with(MachineState::Stopped, false);
-        assert_eq!(dialog.row_label(START_ROW), "Start remote");
+        assert_eq!(start(&dialog).label, "Start");
         assert!(
             dialog.location_label().ends_with("(stopped)"),
             "{}",
@@ -2163,9 +2086,10 @@ mod tests {
             panic!("dialog");
         };
         assert_eq!(dialog.profile().unwrap().label, "box", "selection is kept");
-        assert_eq!(dialog.row_label(START_ROW), "Resume remote");
+        assert_eq!(start(dialog).label, "Resume");
+        assert_eq!(start(dialog).reason, None);
         assert!(dialog.location_label().ends_with("(suspended)"));
-        assert_eq!(dialog.row_label(START_ROW + 1), "Suspend remote…");
+        assert_eq!(dialog.state_text(1), "suspended");
         // A sync result for an older dialog is ignored.
         let (send, receive) = mpsc::channel();
         state.locations.sync = Some((state.locations.epoch.wrapping_sub(1), receive));
@@ -2413,7 +2337,7 @@ mod tests {
             Some(ClientShellOverlay::Locations(_))
         ));
         state.compose(120, 40).unwrap();
-        assert!(!state.hits.settings_choices.is_empty());
+        assert!(!state.hits.remotes.is_empty());
 
         // The Remotes tab keeps the settings tabs, and they lead back to other sections.
         let (rect, _) = *state

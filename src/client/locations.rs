@@ -69,7 +69,7 @@ pub(crate) struct MachinePrefs {
     /// Default directory for new workspaces.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
-    /// Not shown in the sidebar and not connected; still listed in Settings → remotes.
+    /// Not shown in the sidebar and not connected; still listed in Settings → Remotes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
     /// Shown instead of the hangar machine name.
@@ -653,7 +653,7 @@ pub(super) fn set_service_enabled(
 }
 
 /// Shows or hides a hangar machine in the sidebar. A hidden machine is not connected
-/// but stays listed in Settings → remotes.
+/// but stays listed in Settings → Remotes.
 pub(crate) fn set_hidden(binding: &HangarBinding, hidden: bool) -> Result<(), String> {
     let _guard = operation_lock()?;
     let remotes = Remotes::load()?;

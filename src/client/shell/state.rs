@@ -132,6 +132,7 @@ pub(super) struct ShellHitMap {
     pub(super) settings_popup: Rect,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
+    pub(super) remotes: Vec<(Rect, super::locations::view::RemotesHit)>,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) product_announcement_max_scroll: usize,

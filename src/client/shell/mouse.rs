@@ -684,10 +684,8 @@ impl ClientShellState {
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Locations(_))) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                let busy = matches!(
-                    self.overlay,
-                    Some(ClientShellOverlay::Locations(ref dialog)) if dialog.busy
-                );
+                // Settings tabs show only on Settings → Remotes; like ←/→ they always
+                // lead to the other tabs.
                 let tab = self
                     .hits
                     .settings_tabs
@@ -695,11 +693,11 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .map(|(_, section)| *section);
                 if let Some(section) = tab {
-                    if !busy {
-                        self.switch_from_remotes_tab(section, outcome);
-                    }
+                    self.switch_from_remotes_tab(section, outcome);
                 } else if super::contains(self.hits.overlay_cancel, point) {
-                    self.close_location();
+                    self.escape_location();
+                } else if self.click_remotes(point, outcome) {
+                    // Settings → Remotes handled it.
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.accept_location(outcome);
                 } else if let Some((_, index)) = self
@@ -709,19 +707,13 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .copied()
                 {
-                    let mut accept = false;
                     if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
                         if !dialog.busy {
                             dialog.selected = index;
                             if dialog.choice_field(index) {
                                 dialog.cycle_location(1);
-                            } else {
-                                accept = dialog.action_rows();
                             }
                         }
-                    }
-                    if accept {
-                        self.accept_location(outcome);
                     }
                 }
                 outcome.repaint = true;

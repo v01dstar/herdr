@@ -6,16 +6,14 @@ pub(in crate::client::shell) fn render_locations(
     dialog: &LocationDialog,
     palette: &Palette,
 ) -> Option<OverlayRender> {
-    if let LocationDialogKind::Add(form) = &dialog.kind {
-        return render_add_remote(buffer, dialog, form, palette);
+    match &dialog.kind {
+        LocationDialogKind::Add(form) => return render_add_remote(buffer, dialog, form, palette),
+        LocationDialogKind::Manage => {
+            return super::remotes_overlay::render_remotes(buffer, dialog, palette)
+        }
+        _ => {}
     }
-    // The remotes list is the Settings → Remotes tab, so it keeps the settings frame and tabs.
-    let manage = matches!(dialog.kind, LocationDialogKind::Manage);
-    let area = if manage {
-        popup(buffer.area, 76, 22)?
-    } else {
-        popup(buffer.area, 78, 24)?
-    };
+    let area = popup(buffer.area, 78, 24)?;
     let inner = panel(buffer, area, palette.accent, palette.panel_bg)?;
     if inner.width < 20 || inner.height < 7 {
         return None;
@@ -27,27 +25,11 @@ pub(in crate::client::shell) fn render_locations(
         inner.x,
         inner.y,
         inner.width,
-        &format!(" {}", if manage { "settings" } else { dialog.title() }),
+        &format!(" {}", dialog.title()),
         normal.add_modifier(Modifier::BOLD),
     );
-    let settings_tabs = if manage {
-        super::settings_overlay::render_settings_tabs(
-            buffer,
-            inner,
-            crate::client::shell::state::ClientSettingsSection::Remotes,
-            false,
-            palette,
-        )
-    } else {
-        Vec::new()
-    };
-    let rows_top = if manage { inner.y + 4 } else { inner.y + 2 };
-    let visible = usize::from(
-        inner
-            .height
-            .saturating_sub(8)
-            .saturating_sub(rows_top - inner.y - 2),
-    );
+    let rows_top = inner.y + 2;
+    let visible = usize::from(inner.height.saturating_sub(8));
     let scroll = dialog
         .selected
         .min(dialog.labels().len().saturating_sub(1))
@@ -78,15 +60,6 @@ pub(in crate::client::shell) fn render_locations(
                 &format!(" {label}: ‹ {} ›", dialog.location_label()),
                 style,
             );
-        } else if dialog.action_rows() {
-            put_text(
-                buffer,
-                rect.x,
-                rect.y,
-                rect.width,
-                &format!(" {}", dialog.row_label(index)),
-                style,
-            );
         } else if let Some(editor) = dialog.fields.get(index) {
             let prefix = format!(" {label}: ");
             let width = display_width(&prefix).min(rect.width);
@@ -102,13 +75,10 @@ pub(in crate::client::shell) fn render_locations(
     }
     use ratatui::widgets::{Paragraph, Widget, Wrap};
     // Confirmations have no rows, so their text gets the whole body; Save as image and
-    // Save as image, Fork machine and the account have few rows and a long explanation
-    // below them.
+    // Fork machine have few rows and a long explanation below them.
     let message_area = if matches!(
         dialog.kind,
-        LocationDialogKind::SaveImage(_)
-            | LocationDialogKind::Fork(_)
-            | LocationDialogKind::Account
+        LocationDialogKind::SaveImage(_) | LocationDialogKind::Fork(_)
     ) {
         let top = inner.y + 2 + dialog.labels().len() as u16 + 1;
         Rect::new(
@@ -132,7 +102,7 @@ pub(in crate::client::shell) fn render_locations(
             4,
         )
     };
-    Paragraph::new(dialog.body())
+    Paragraph::new(dialog.message.as_str())
         .style(normal)
         .wrap(Wrap { trim: true })
         .render(message_area, buffer);
@@ -141,7 +111,7 @@ pub(in crate::client::shell) fn render_locations(
     } else {
         match dialog.kind {
             LocationDialogKind::Add(_) => " ↵ connect ",
-            LocationDialogKind::Manage | LocationDialogKind::Account => " ↵ select ",
+            LocationDialogKind::Manage => " ↵ select ",
             LocationDialogKind::SignOut => " ↵ sign out ",
             LocationDialogKind::Edit(_) => " ↵ save ",
             LocationDialogKind::New => " ↵ create ",
@@ -170,13 +140,18 @@ pub(in crate::client::shell) fn render_locations(
         label,
         if enabled { highlight } else { normal },
     );
-    button(buffer, cancel, " esc close ", normal.bg(palette.surface0));
+    // Forms and confirmations of Settings → Remotes go back to it.
+    let close = if matches!(dialog.kind, LocationDialogKind::New) {
+        " esc close "
+    } else {
+        " esc back "
+    };
+    button(buffer, cancel, close, normal.bg(palette.surface0));
     Some(OverlayRender {
         area,
         primary,
         cancel,
         settings_choices: hits,
-        settings_tabs,
         cursor,
         ..Default::default()
     })
@@ -293,7 +268,7 @@ pub(in crate::client::shell) fn render_add_remote(
             selected
         },
     );
-    button(buffer, cancel, " esc close ", normal.bg(palette.surface0));
+    button(buffer, cancel, " esc back ", normal.bg(palette.surface0));
     if let Some((field, selection)) = form.dropdown {
         let items = form.options(field);
         let y = inner.y + 3 + field as u16 * 2;

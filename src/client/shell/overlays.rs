@@ -1,6 +1,7 @@
 use super::*;
 
 mod location_overlay;
+mod remotes_overlay;
 mod settings_overlay;
 pub(in crate::client::shell) use location_overlay::render_locations;
 pub(in crate::client::shell) use settings_overlay::render_settings_overlay;
@@ -27,6 +28,8 @@ pub(crate) struct OverlayRender {
     pub(crate) settings_popup: Rect,
     pub(crate) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(crate) settings_choices: Vec<(Rect, usize)>,
+    /// Settings → Remotes: sub-views, list items and actions.
+    pub(crate) remotes: Vec<(Rect, crate::client::shell::locations::view::RemotesHit)>,
     pub(crate) product_announcement_scrollbar: Rect,
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) product_announcement_max_scroll: usize,
