@@ -14,6 +14,8 @@ pub(super) use overlays::layout_settings_tabs;
 pub(super) use overlays::render_locations;
 pub(super) use overlays::render_settings_overlay;
 pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
+#[cfg(test)]
+pub(super) use overlays::{CHECK, COPY_TABLE, CROSS};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
 

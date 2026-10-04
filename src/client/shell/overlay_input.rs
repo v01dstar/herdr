@@ -330,16 +330,28 @@ impl ClientShellState {
             })
     }
 
-    pub(super) fn open_new_workspace_overlay(&mut self) {
-        let source_workspace_id = self.workspace_action_id();
-        let cwd = self.snapshot.as_deref().and_then(|snapshot| {
-            let workspace_id = source_workspace_id.as_deref()?;
-            snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == workspace_id)
-                .map(|workspace| workspace.new_workspace_cwd.clone())
-        });
+    /// The name prompt of New workspace (`prompt_new_workspace_name`) for a workspace
+    /// on `destination`.
+    pub(super) fn open_new_workspace_overlay(
+        &mut self,
+        destination: super::locations::WorkspaceDestination,
+    ) {
+        let (source_workspace_id, cwd, destination) =
+            if destination.endpoint() == self.active_endpoint_id {
+                let source_workspace_id = self.workspace_action_id();
+                let source_cwd = self.snapshot.as_deref().and_then(|snapshot| {
+                    let workspace_id = source_workspace_id.as_deref()?;
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == workspace_id)
+                        .map(|workspace| workspace.new_workspace_cwd.clone())
+                });
+                (source_workspace_id, destination.cwd().or(source_cwd), None)
+            } else {
+                // Another machine: its own default directory, never a path from here.
+                (None, destination.cwd(), Some(Box::new(destination)))
+            };
         let suggested_name = cwd
             .as_deref()
             .map(std::path::Path::new)
@@ -352,6 +364,7 @@ impl ClientShellState {
                 source_workspace_id,
                 cwd,
                 suggested_name,
+                destination,
             },
         }));
     }
@@ -940,9 +953,20 @@ impl ClientShellState {
         let trimmed = rename.input.trim();
         let method = match rename.target {
             ClientRenameTarget::NewWorkspace {
+                destination: Some(destination),
+                suggested_name,
+                ..
+            } => {
+                let label =
+                    (!trimmed.is_empty() && trimmed != suggested_name).then(|| trimmed.to_owned());
+                self.create_workspace_at(*destination, label, outcome);
+                None
+            }
+            ClientRenameTarget::NewWorkspace {
                 source_workspace_id,
                 cwd,
                 suggested_name,
+                destination: None,
             } => Some(crate::api::schema::Method::WorkspaceCreate(
                 crate::api::schema::WorkspaceCreateParams {
                     source_workspace_id,

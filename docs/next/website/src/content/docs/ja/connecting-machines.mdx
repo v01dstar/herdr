@@ -19,15 +19,17 @@ Linux と macOS で `remote.manage_ssh_config=true` の場合、マシン追加�
 
 Remote は Settings の他の設定の後に並ぶ 3 つのタブ **remotes**、**images**、**account** で設定します（タブ行全体は `theme  indicators  sound  toasts  integrations  remotes  images  account` です）。右上にはサインイン中の hangar ユーザーが表示されます。狭いターミナルではタブ行がスクロールして開いているタブを常に表示し、隠れたタブは `‹` と `›` で示します。Remote のポップアップは、マシンの操作が収まるよう他のタブより数行高くなります。
 
-**remotes** タブは Local、hangar マシン、SSH の Remote の順に一覧表示し、最後に **+ Add remote** を表示します。Remote には名前の前に `⇄` が付き（Local には付きません）、右端に状態を単語で表示します: **running**（緑）、**stopped** または **suspended**（薄色）、**starting…**、**stopping…** などの遷移中（黄）、**error**（赤）、**unknown**、SSH の Remote では **connected**、**disabled**、**offline** です。hangar に到達できない場合やサインインしていない場合は、最後に同期した状態として **offline** または **signed out** と表示します。**default** や **hidden** などの注記は状態の前に表示します。右側のペインには選択中の Remote が `name · hangar|ssh · state` の形式で表示され、その下に hangar が報告する場合はテンプレート、サイズ、フォーク元のマシンや作成元のイメージ（エラー状態のマシンでは最後のエラー）が表示されます。その下に操作が 1 列で、空行で区切ったグループごとに並びます: **Start** または **Resume**、**Suspend…**、**Stop…**。次に **Test connection**、**Edit…**、**Use as default**、**Hide from sidebar**（または **Show in sidebar**）、SSH の Remote では **Start session**。次に **Save as image…** と **Fork…**。最後に **Delete machine…** または **Remove remote** です。その種類の Remote に適用できる操作だけが表示されます。SSH の Remote には起動・停止とコピーの操作がなく、Local には **Use as default** だけがあります。起動・停止の操作は状態に従います: 停止中は **Start**、サスペンド中は **Resume**、起動中は **Suspend…** と **Stop…**、エラー時は **Start** と **Stop…** です。状態の遷移中は、次に使える操作が完了まで薄く表示されます。適用できるが別の理由で使えない操作は薄く表示され、選択すると一覧の下に理由（例: **Template too old for images**、**Sign in on the account tab first**、hangar に到達できないこと）が表示されます。タブを開いている間は一覧が自動で更新されるため、状態を確認する専用の操作はありません。
+**remotes** タブは Local、hangar マシン、SSH の Remote の順に一覧表示し、最後に **+ Add remote** を表示します。Remote には名前の前に `⇄` が付き（Local には付きません）、右端に状態を単語で表示します: **running**（緑）、**stopped** または **suspended**（薄色）、**starting…**、**stopping…** などの遷移中（黄）、**error**（赤）、**unknown**、SSH の Remote では **connected**、**disabled**、**offline** です。hangar に到達できない場合やサインインしていない場合は、最後に同期した状態として **offline** または **signed out** と表示します。**default** や **hidden** などの注記は状態の前に表示します。右側のペインには選択中の Remote が `name · hangar|ssh · state` の形式で表示され、その下に hangar が報告する場合はテンプレート、サイズ、クローン元のマシンや作成元のイメージ（エラー状態のマシンでは最後のエラー）が表示されます。その下に操作が 1 列で、空行で区切ったグループごとに並びます: **Start** または **Resume**、**Suspend…**、**Stop…**。次に **Test connection**、**Edit…**、**Use as default**、**Hide from sidebar**（または **Show in sidebar**）、SSH の Remote では **Start session**。次に **Copy machine…**。最後に **Delete machine…** または **Remove remote** です。その種類の Remote に適用できる操作だけが表示されます。SSH の Remote には起動・停止とコピーの操作がなく、Local には **Use as default** だけがあります。起動・停止の操作は状態に従います: 停止中は **Start**、サスペンド中は **Resume**、起動中は **Suspend…** と **Stop…**、エラー時は **Start** と **Stop…** です。状態の遷移中は、次に使える操作が完了まで薄く表示されます。適用できるが別の理由で使えない操作は薄く表示され、選択すると一覧の下に理由（例: **Template too old to copy**、**Sign in on the account tab first**、hangar に到達できないこと）が表示されます。タブを開いている間は一覧が自動で更新されるため、状態を確認する専用の操作はありません。
 
-タブをクリックすると開き、Remote をクリックすると選択し、操作をクリックすると実行します。キーボードでは、他のタブと同じく ←/→（**h**/**l**、**Tab**/**Shift+Tab** も可）ですべての settings タブを切り替えます。remotes タブと images タブでは ↑/↓（または **k**/**j**）でフォーカス中のペイン内を移動し、**Enter** で一覧から操作へ移動して選択中の操作を実行し、**Esc** で一覧へ戻ります。一覧で **Esc** を押すと Settings を閉じます。最下行にこれらのキーが表示されます。フォームと確認（Remote の追加・編集、停止、サスペンド、削除、イメージ保存、フォーク、サインアウト）はダイアログとして開き、閉じると同じタブ・Remote・操作が選択された状態に戻ります。
+タブをクリックすると開き、Remote をクリックすると選択し、操作をクリックすると実行します。キーボードでは、他のタブと同じく ←/→（**h**/**l**、**Tab**/**Shift+Tab** も可）ですべての settings タブを切り替えます。remotes タブと images タブでは ↑/↓（または **k**/**j**）でフォーカス中のペイン内を移動し、**Enter** で一覧から操作へ移動して選択中の操作を実行し、**Esc** で一覧へ戻ります。一覧で **Esc** を押すと Settings を閉じます。最下行にこれらのキーが表示されます。フォームと確認（Remote の追加・編集、停止、サスペンド、削除、マシンのコピー、サインアウト）はダイアログとして開き、閉じると同じタブ・Remote・操作が選択された状態に戻ります。
 
 **+ Add remote → Provider: SSH** で SSH 接続先を手動追加できます。表示名、SSH ターゲットまたはエイリアス、固定の Herdr session 名、必要に応じてリモートの既定ディレクトリを指定します。互換性のある Herdr と非対話 SSH 認証を、接続先にあらかじめ用意してください。**Test connection** は SSH と実行中の session を確認し、**Start session** はインストール済みの session を起動し、Remote を有効にします。ソフトウェアのインストールや置き換えは行いません。
 
-Local または Remote を選び、**Use as default** で新規作成先を設定します。Remote を保存すると、**New workspace** で名前・場所・ディレクトリを指定するダイアログが開きます。既定の作成先は現在表示しているマシンと独立しています。場所を変えるとディレクトリはそのマシンの設定に戻り、空欄なら接続先サーバーの既定値を使います。1 つの workspace 内の全 tab と pane は同じマシンで動作し、1 つのリモート session に複数の workspace を作成できます。
+Local または Remote を選び、**Use as default** で新規作成先を設定します。**New workspace**（キーバインド、サイドバーの **new workspace**、モバイルメニュー）は、作成先を尋ねずに既定のマシン（未設定なら Local）に、そのマシンの既定ディレクトリで workspace を作成します。ディレクトリが空欄なら接続先サーバーの既定値を使います。既定の作成先は現在表示しているマシンと独立しています。`prompt_new_workspace_name = true` の場合は、単一マシンのときと同じく先に名前を尋ねます。1 つの workspace 内の全 tab と pane は同じマシンで動作し、1 つのリモート session に複数の workspace を作成できます。
 
-作成はバックグラウンドで実行されます。送信後にダイアログを閉じても、受理済みの作成は取り消されません。タイムアウト時は結果が不明な場合があるため、再試行の前に接続先を確認してください。Herdr が作成要求を自動で再送することはありません。
+New workspace がマシンを起動することはありません。既定のマシンが停止中、接続中、無効、またはサイドバーで非表示の場合は、「Default machine box isn't connected — start it in Settings → remotes, or choose another default」のような通知を表示し、何も作成しません。別のマシンに workspace を作成するには、先にそのマシンで **Use as default** を選ぶか、`herdr --machine <label-or-id> workspace create` を実行してください。
+
+表示中以外のマシンでは作成がバックグラウンドで実行され、そのマシンの一覧に現れた時点で新しい workspace にフォーカスします。その間にマシンを切り替えたりダイアログを開いたりした場合はフォーカスしません。タイムアウト時は結果が不明な場合があるため、再試行の前に接続先の workspace 一覧を確認してください。Herdr が作成要求を自動で再送することはありません。
 
 ### hangar マシン
 
@@ -43,25 +45,37 @@ Herdr がマシンごとに保持するのはローカルの設定だけです�
 
 Herdr は hangar の SSH ゲートウェイ経由でマシンに接続します。専用の SSH 鍵と短期証明書（4 時間）を state ディレクトリの `client/hangar/ssh/` に保持し、ゲートウェイの設定は一時的な SSH 設定にだけ書き込みます。`~/.ssh/config` は変更しません。hangar マシンの SSH ターゲットは `hangar-<machine ID>` というエイリアスです。新しい接続の前に、マシンが起動中であることを確認し、証明書の残り時間が 15 分を切っていれば更新します。接続共有は有効のままです。マシン停止時にゲートウェイが既存接続を閉じるため、再接続で古い runtime への接続を再利用することはありません。
 
-Herdr がマシンを暗黙に起動することはありません。マシンが停止中の場合、再接続、**Test connection**、**New workspace**、`herdr --machine` は「use Start remote」というエラーになります。remotes タブに各マシンの状態が表示されます。**Start** はマシンを起動し、準備完了を待ってから保存済みの Herdr session を起動します。**Stop…** はそのマシン上の**全 session とジョブ**を停止するため、確認を求めます。マシンが再接続しないようにし、その Herdr session の終了を試みてからマシンを停止します。永続ディスクのファイルは残りますが、実行中のプロセスは残りません。**Suspend…** は確認後、マシンが再接続しないようにし、マシンのメモリをスナップショットに保存します。Herdr session は中で動いたままなので、実行中のプログラムも保持されます。サスペンド中のマシンは **suspended** と表示され、**Start** は **Resume** になります。再開するとスナップショットを復元して再接続します。再接続や **Test connection** がマシンを再開することはありません。サインインの期限が切れると **Sign in to hangar** と表示されます。利用が許可されていないマシンでは「not allowed on this server」と表示され、再サインインは求めません。
+Herdr がマシンを暗黙に起動することはありません。マシンが停止中の場合、再接続、**Test connection**、`herdr --machine` は「use Start remote」というエラーになり、**New workspace** は何も作成せずに通知を表示します。remotes タブに各マシンの状態が表示されます。**Start** はマシンを起動し、準備完了を待ってから保存済みの Herdr session を起動します。**Stop…** はそのマシン上の**全 session とジョブ**を停止するため、確認を求めます。マシンが再接続しないようにし、その Herdr session の終了を試みてからマシンを停止します。永続ディスクのファイルは残りますが、実行中のプロセスは残りません。**Suspend…** は確認後、マシンが再接続しないようにし、マシンのメモリをスナップショットに保存します。Herdr session は中で動いたままなので、実行中のプログラムも保持されます。サスペンド中のマシンは **suspended** と表示され、**Start** は **Resume** になります。再開するとスナップショットを復元して再接続します。再接続や **Test connection** がマシンを再開することはありません。サインインの期限が切れると **Sign in to hangar** と表示されます。利用が許可されていないマシンでは「not allowed on this server」と表示され、再サインインは求めません。
 
 同じローカル Herdr state ディレクトリを使うクライアント間では Remote 設定の変更を直列化し、マシン操作は hangar サーバーが直列化します。他のクライアントが接続先を変更した場合、ダイアログを開き直してください。SSH の Remote の **Remove remote** はローカルの接続設定だけを削除します。hangar マシンは Herdr だけから取り除くことはできないため、**Remove remote** はありません。**Delete machine…** はマシン名を示して確認を求め、確認後にマシンとそのディスク・スナップショットを完全に削除し、Herdr はその設定・証明書・接続キャッシュを破棄します。hangar 側でマシンがすでに削除済みならローカルの後片付けだけを行います。それ以外の失敗ではマシンは一覧に残るので、再試行できます。ターミナルでは `herdr machine remove <profile-id> --delete-machine` が同じ処理を行い、フラグがなければ削除と非表示の違いを説明して拒否します（`herdr machine disable <profile-id>` で hangar マシンを非表示に、`enable` で再表示し、`rename` で Herdr での表示名を設定します）。SSH catalog（`client/endpoints.json`）は generation-one 互換のまま SSH の Remote だけを保持します。hangar マシンの設定は `client/locations.json` に、最後に受け取ったマシン一覧は `client/hangar-machines.json` に保存します。以前の Herdr で保存した hangar の Remote はアップグレード時に変換され、エンドポイント ID（開いているワークスペースと session 状態が引き継がれます）、名前、session、既定ディレクトリを保持します。以前の Instacloud 連携で作成した Remote はアップグレード時に無効化されます。profile と既定ディレクトリは残るので、不要なら削除してください。
 
-#### イメージ
+#### マシンのコピー
 
-イメージはマシンのルートディスクを保存し、新しいマシンをそこから作成できるようにします。hangar の Remote で **Save as image…** を選び、名前（英小文字・数字・`-`）と任意の説明を入力して確定します。保存されるのはルートディスクだけです。インストール済みパッケージとシステム設定は含まれますが、ホームディレクトリ（`/data/home`）のファイル、そこに保存されたログイン情報（gh、Claude、Codex、git、SSH）、`/data/workspace` は含まれません。`sudo gh auth` の認証情報や `/etc/environment` のトークンなど、ルートディスクに書き込まれたものはすべて含まれるため、保存前に削除してください。イメージは自分の hangar アカウントだけが使えます。
+hangar の Remote で **Copy machine…** を選ぶと、クローンかイメージのどちらかを作成できます。2 つの選択肢を並べ、それぞれが何をコピーするかを表で示す選択画面が開きます:
 
-保存できるのは停止中のマシンだけです。起動中のマシンでは、ダイアログが **Stop machine and save** を提示します。これは **Stop…** と同じ手順（再接続の防止、Herdr session の終了、マシンの停止）でマシンを停止してからイメージを保存します。サスペンド中のマシンは一度再開してから停止します。保存後もマシンは停止したままなので、作業を続けるには **Start** を使います。マシン ID のリセットに対応していない古いテンプレートから作成したマシンは保存できません。ダイアログにその旨が表示されるので、最新テンプレートで新しいマシンを作成・設定してから保存してください。
+|                     | Clone now   | Save as image  |
+| ------------------- | ----------- | -------------- |
+| Installed software  | ✓           | ✓              |
+| System settings     | ✓           | ✓              |
+| Repos & home files  | ✓           | ✗              |
+| Logins (gh, claude) | ✓           | ✗              |
+| Result              | new machine | reusable image |
 
-**images** タブは自分のイメージを新しい順に作成日付きで一覧表示します。選択すると説明、作成日、保存元のマシン、テンプレート、サイズが表示され、**New machine from image…**（そのイメージを **Source** に選んだ状態で **Add remote** を開きます）または **Delete image…** を選べます。イメージがまだない場合は、タブに保存方法が表示されます。
+←/→ または列のクリックで選び、**Enter**（またはもう一度クリック）でその選択肢のフォームに進みます。フォームで **Esc** を押すと選択画面に戻り、選択画面で **Esc** を押すと同じ Remote と操作が選択された remotes タブに戻ります。
+
+どちらも停止中のマシンが必要です。起動中のマシンでは、フォームが **Stop machine and clone** または **Stop machine and save** を提示します。これは **Stop…** と同じ手順（再接続の防止、Herdr session の終了、マシンの停止）でマシンを停止してからコピーします。サスペンド中のマシンは一度再開してから停止します。コピー後もマシンは停止したままなので、作業を続けるには **Start** を使います。マシン ID のリセットに対応していない古いテンプレートから作成したマシンはコピーできません（**Template too old to copy**）。フォームにその旨が表示されるので、最新テンプレートで新しいマシンを作成・設定してからコピーしてください。
+
+##### クローン
+
+**Clone now** はこのマシンとまったく同じ 2 台目のマシンを作成します。ルートディスク**と** `/data` ディスクの両方をコピーします。新しいマシンの名前（英小文字・数字・`-`。既定は `<machine>-clone`）を入力して確定します。両ディスクの内容はすべてコピーされます。インストール済みソフトウェア、システム設定、リポジトリ、ホームディレクトリ（`/data/home`）、そこに保存されたログイン情報（gh、Claude、Codex、SSH 鍵など）も含まれるため、クローンは元のマシンと同様に扱ってください。クローンには独自の SSH ホスト鍵、マシン ID、ホスト名が割り当てられます。Herdr はクローンが起動して準備完了になるまで待ち、**Create new machine** と同様に remotes タブに追加して Herdr session を開始します。クローンは hangar のマシン数上限に数えられます。
+
+##### イメージ
+
+**Save as image** は新しいマシンの出発点として、マシンのルートディスクだけを保存します。名前（英小文字・数字・`-`）と任意の説明を入力して確定します。インストール済みソフトウェアとシステム設定は含まれますが、ホームディレクトリ（`/data/home`）のファイル、そこに保存されたログイン情報（gh、Claude、Codex、git、SSH）、`/data/workspace` のリポジトリは含まれません。`sudo gh auth` の認証情報や `/etc/environment` のトークンなど、ルートディスクに書き込まれたものはすべて含まれるため、保存前に削除してください。イメージは自分の hangar アカウントだけが使えます。
+
+**images** タブは自分のイメージを新しい順に作成日付きで一覧表示します。選択すると説明、作成日、保存元のマシン、テンプレート、サイズが表示され、**New machine from image…**（そのイメージを **Source** に選んだ状態で **Add remote** を開きます）または **Delete image…** を選べます。イメージがまだない場合は、**Copy machine… → Save as image** で保存する方法がタブに表示されます。
 
 **+ Add remote → Create new machine** を選び、**Source** でイメージを選ぶこともできます。一覧には各イメージの名前、作成日、保存元のマシンが表示されます。既定のソースは最新の `herdr` テンプレートです。イメージから作成したマシンはイメージのルートディスクと新しい空の `/data` を持つため、ツールへのログインはやり直してください。イメージをソースとして選んでいるときは **Delete image…** で確認後に削除できます。そのイメージから作成済みのマシンには影響しません。
-
-#### フォーク
-
-フォークは hangar マシンを丸ごと複製した新しいマシンです。ルートディスク**と** `/data` ディスクの両方をコピーします。hangar の Remote で **Fork…** を選び、新しいマシンの名前（英小文字・数字・`-`。既定は `<machine>-fork`）を入力して確定します。両ディスクの内容はすべてコピーされます。リポジトリ、ホームディレクトリ（`/data/home`）、そこに保存されたログイン情報（gh、Claude、Codex、SSH 鍵など）も含まれるため、フォークは元のマシンと同様に扱ってください。フォークには独自の SSH ホスト鍵、マシン ID、ホスト名が割り当てられます。フォークは hangar のマシン数上限に数えられます。
-
-フォークできるのは停止中のマシンだけで、扱いは **Save as image…** と同じです。起動中のマシンではダイアログが **Stop machine and fork** を提示し、**Stop…** と同じ手順で停止してからフォークします。サスペンド中のマシンは一度再開してから停止します。マシン ID のリセットに対応していない古いテンプレートのマシンはフォークできません。Herdr はフォークが起動して準備完了になるまで待ち、**Create new machine** と同様に一覧に追加して Herdr session を開始します。元のマシンは停止したままなので、作業を続けるには **Start** を使います。
 
 ## 接続前の確認
 

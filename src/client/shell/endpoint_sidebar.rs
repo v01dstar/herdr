@@ -530,7 +530,7 @@ pub(super) fn render_expanded(
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
     if config.mouse_capture {
-        let label = " new workspace…".to_owned();
+        let label = " new workspace".to_owned();
         hits.new_workspace = Rect::new(
             workspace_area.x,
             footer_y,

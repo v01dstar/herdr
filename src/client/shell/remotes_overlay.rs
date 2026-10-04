@@ -409,7 +409,7 @@ fn remote_info(dialog: &LocationDialog, row: ListRow) -> (String, Option<String>
             }
             if let Some(source) = details.and_then(|details| details.forked_from.as_deref()) {
                 parts.push(format!(
-                    "forked from {}",
+                    "cloned from {}",
                     dialog.machine_name(source).unwrap_or(source)
                 ));
             }
@@ -538,7 +538,7 @@ fn render_remote_details(
     }
 }
 
-const NO_IMAGES: &str = "No images yet. An image saves a hangar machine's root disk (installed packages and system configuration) so new machines can start from it. To save one, select a hangar machine on the remotes tab and choose Save as image….";
+const NO_IMAGES: &str = "No images yet. An image saves a hangar machine's root disk (installed software and system settings) so new machines can start from it. To save one, select a hangar machine on the remotes tab and choose Copy machine… → Save as image.";
 
 fn render_images_tab(
     buffer: &mut Buffer,

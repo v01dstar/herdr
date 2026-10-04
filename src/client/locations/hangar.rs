@@ -250,8 +250,8 @@ pub(crate) fn create_with(
     wait_ready(client, &operation.machine_id, progress)
 }
 
-/// What Save as image… stores, shown before saving.
-pub(crate) const IMAGE_CONTENTS: &str = "Saves the machine's root disk only. Installed packages and system configuration are included. Your home directory files, logins and /data/workspace are not. Anything written to the root disk is included, such as credentials from `sudo gh auth` or tokens in /etc/environment. The image is private to your hangar account.";
+/// What Copy machine… → Save as image stores, shown before saving.
+pub(crate) const IMAGE_CONTENTS: &str = "Saves the machine's root disk only: installed software and system settings. Repositories, home directory files and logins on /data are not included. Anything written to the root disk is included, such as credentials from `sudo gh auth` or tokens in /etc/environment. The machine is stopped first and stays stopped. The image appears on the images tab; New machine from image… starts machines from it. Images are private to your hangar account.";
 
 /// How a machine becomes saveable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,7 +271,8 @@ pub(crate) struct SaveCheck {
     pub note: String,
 }
 
-/// What a stopped machine's snapshot is used for: Save as image… or Fork machine….
+/// What a stopped machine's snapshot is used for: Copy machine… → Save as image or
+/// Clone now (hangar's fork).
 /// Both need the same stopped, uploaded machine and identity-reset template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotUse {
@@ -284,7 +285,7 @@ impl SnapshotUse {
     fn passive(self) -> &'static str {
         match self {
             SnapshotUse::Image => "saved",
-            SnapshotUse::Fork => "forked",
+            SnapshotUse::Fork => "cloned",
         }
     }
 
@@ -292,7 +293,7 @@ impl SnapshotUse {
     fn stop_action(self) -> &'static str {
         match self {
             SnapshotUse::Image => "Stop machine and save",
-            SnapshotUse::Fork => "Stop machine and fork",
+            SnapshotUse::Fork => "Stop machine and clone",
         }
     }
 
@@ -300,29 +301,26 @@ impl SnapshotUse {
     fn then(self) -> &'static str {
         match self {
             SnapshotUse::Image => "saves the image",
-            SnapshotUse::Fork => "forks it",
+            SnapshotUse::Fork => "clones it",
         }
     }
 
     fn too_old(self) -> &'static str {
         match self {
             SnapshotUse::Image => "save images from",
-            SnapshotUse::Fork => "fork",
+            SnapshotUse::Fork => "clone",
         }
     }
 
     fn redo(self) -> &'static str {
         match self {
             SnapshotUse::Image => "save that one",
-            SnapshotUse::Fork => "fork that one",
+            SnapshotUse::Fork => "clone that one",
         }
     }
 
     fn dialog(self) -> &'static str {
-        match self {
-            SnapshotUse::Image => "Save as image…",
-            SnapshotUse::Fork => "Fork machine…",
-        }
+        "Copy machine…"
     }
 }
 
@@ -489,12 +487,12 @@ pub(crate) fn delete_image_with(client: &Client, id: &str) -> Result<Deletion, H
     }
 }
 
-/// What Fork machine… copies, shown before forking.
-pub(crate) const FORK_CONTENTS: &str = "The fork is a new machine with a copy of this machine's root disk and its /data disk: repositories, your home directory, and signed-in credentials (gh, Claude, Codex, SSH keys). It gets its own SSH host keys, machine ID and hostname, starts, and is added as a remote. This machine is left stopped. Forks count toward your machine limit.";
+/// What Copy machine… → Clone now copies, shown before cloning.
+pub(crate) const CLONE_CONTENTS: &str = "The clone is a new machine with a copy of this machine's root disk and its /data disk: installed software, system settings, repositories, your home directory, and signed-in credentials (gh, Claude, Codex, SSH keys). It gets its own SSH host keys, machine ID and hostname, starts as a new machine, and appears on the remotes tab. This machine is stopped first and stays stopped. Clones count toward your machine limit.";
 
-/// The suggested fork name: `<source>-fork`, shortened to hangar's 63 bytes.
-pub(crate) fn default_fork_name(source: &str) -> String {
-    const SUFFIX: &str = "-fork";
+/// The suggested clone name: `<source>-clone`, shortened to hangar's 63 bytes.
+pub(crate) fn default_clone_name(source: &str) -> String {
+    const SUFFIX: &str = "-clone";
     let mut base = source.to_owned();
     while base.len() + SUFFIX.len() > 63 {
         base.pop();
@@ -502,7 +500,7 @@ pub(crate) fn default_fork_name(source: &str) -> String {
     format!("{}{SUFFIX}", base.trim_end_matches('-'))
 }
 
-/// Fork names follow hangar's machine name rule; checked before anything is stopped.
+/// Clone names follow hangar's machine name rule; checked before anything is stopped.
 pub(crate) fn validate_fork_name(name: &str) -> Result<(), String> {
     if valid_name(name) {
         Ok(())
@@ -511,7 +509,7 @@ pub(crate) fn validate_fork_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Text for a failed fork: hangar's own explanation for refusals and quota limits.
+/// Text for a failed clone: hangar's own explanation for refusals and quota limits.
 pub(crate) fn fork_error(error: &HangarError) -> String {
     match error {
         HangarError::Api(api)
@@ -540,7 +538,7 @@ pub(crate) fn fork_with(
     progress: Progress<'_>,
 ) -> Result<Machine, HangarError> {
     prepare_source(client, source_id, plan, quiesce, progress)?;
-    progress(format!("Forking into {name}…"));
+    progress(format!("Cloning into {name}…"));
     let request = ForkMachineRequest {
         name,
         desired_state: "running",
@@ -551,7 +549,7 @@ pub(crate) fn fork_with(
         progress,
     )?;
     if operation.machine_id.is_empty() {
-        return Err(HangarError::Invalid("fork returned no machine".into()));
+        return Err(HangarError::Invalid("clone returned no machine".into()));
     }
     wait_ready(client, &operation.machine_id, progress)
 }
@@ -1350,31 +1348,31 @@ mod tests {
     }
 
     #[test]
-    fn fork_checks_plan_like_images_with_fork_wording() {
+    fn clone_checks_plan_like_images_with_clone_wording() {
         assert_eq!(fork_check("stopped", NEW, true).plan, Some(SavePlan::Save));
         let running = fork_check("running", NEW, true);
         assert_eq!(running.plan, Some(SavePlan::Stop));
         assert!(running.note.contains(
-            "Only a stopped machine can be forked. Stop machine and fork stops all sessions"
+            "Only a stopped machine can be cloned. Stop machine and clone stops all sessions"
         ));
-        assert!(running.note.ends_with("then forks it."));
+        assert!(running.note.ends_with("then clones it."));
         let errored = fork_check("error", NEW, true);
         assert_eq!(errored.plan, Some(SavePlan::Stop));
         let unsynced = fork_check("stopped", NEW, false);
         assert_eq!(unsynced.plan, Some(SavePlan::Stop));
         assert!(unsynced
             .note
-            .contains("Stop machine and fork stops it again"));
+            .contains("Stop machine and clone stops it again"));
         let suspended = fork_check("suspended", NEW, true);
         assert_eq!(suspended.plan, Some(SavePlan::ResumeThenStop));
         assert!(suspended.note.contains("resumes it"));
         let old = fork_check("stopped", "2026-10-02.1", true);
         assert_eq!(old.plan, None);
-        assert!(old.note.contains("which is too old to fork."));
-        assert!(old.note.contains("fork that one"));
+        assert!(old.note.contains("which is too old to clone."));
+        assert!(old.note.contains("clone that one"));
         let busy = fork_check("starting", NEW, true);
         assert_eq!(busy.plan, None);
-        assert!(busy.note.contains("then open Fork machine… again"));
+        assert!(busy.note.contains("then open Copy machine… again"));
     }
 
     #[test]
@@ -1538,13 +1536,13 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), Some(&ErrorCode::NoCapacity));
-        assert_eq!(default_fork_name("box"), "box-fork");
-        let long = default_fork_name(&"a".repeat(63));
+        assert_eq!(default_clone_name("box"), "box-clone");
+        let long = default_clone_name(&"a".repeat(63));
         assert_eq!(long.len(), 63);
         assert!(validate_fork_name(&long).is_ok());
         assert_eq!(
-            default_fork_name(&format!("{}-b", "a".repeat(57))),
-            format!("{}-fork", "a".repeat(57))
+            default_clone_name(&format!("{}-b", "a".repeat(57))),
+            format!("{}-clone", "a".repeat(57))
         );
         assert!(validate_fork_name("box-fork").is_ok());
         for bad in ["", "-x", "Box", "a b", &"a".repeat(64)] {

@@ -81,25 +81,8 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::NewWorkspace {
-                    if self.endpoints.len() > 1 {
-                        self.open_location_workspace();
-                    } else if self.config.prompt_new_workspace_name {
-                        self.open_new_workspace_overlay();
-                    } else {
-                        self.push_endpoint_method(
-                            crate::api::schema::Method::WorkspaceCreate(
-                                crate::api::schema::WorkspaceCreateParams {
-                                    source_workspace_id: self.workspace_action_id(),
-                                    cwd: None,
-                                    focus: true,
-                                    label: None,
-                                    env: Default::default(),
-                                },
-                            ),
-                            outcome,
-                        );
-                    }
-                    outcome.repaint = true;
+                    // Also the sidebar's new workspace and the mobile menu's entry.
+                    self.new_workspace(outcome);
                     return;
                 }
                 if action == crate::input::KeybindAction::RenameWorkspace {

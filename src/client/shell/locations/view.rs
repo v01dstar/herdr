@@ -47,8 +47,8 @@ pub(in crate::client::shell) enum RemoteAction {
     Edit,
     Default,
     Hide,
-    SaveImage,
-    Fork,
+    /// Copy machine…: clone it or save it as an image.
+    Copy,
     Remove,
 }
 
@@ -92,7 +92,7 @@ pub(in crate::client::shell) struct RemoteFacts {
     pub signed_out: bool,
     /// Its hangar server could not be reached; the state is the last synced one.
     pub offline: bool,
-    /// Whether its template allows images and forks; `None` when unknown.
+    /// Whether its template allows images and clones; `None` when unknown.
     pub snapshots: Option<bool>,
 }
 
@@ -222,7 +222,7 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
             } else {
                 Some("Start the machine first")
             };
-            let snapshot = |too_old| match facts.snapshots {
+            let snapshot = |too_old: &'static str| match facts.snapshots {
                 Some(false) => Some(too_old),
                 _ => waiting,
             };
@@ -257,16 +257,10 @@ pub(in crate::client::shell) fn remote_actions(facts: &RemoteFacts) -> Vec<Actio
                         None,
                     ),
                     entry(
-                        RemoteAction::SaveImage,
+                        RemoteAction::Copy,
                         ActionGroup::Copy,
-                        "Save as image…",
-                        server(snapshot("Template too old for images")),
-                    ),
-                    entry(
-                        RemoteAction::Fork,
-                        ActionGroup::Copy,
-                        "Fork…",
-                        server(snapshot("Template too old to fork")),
+                        "Copy machine…",
+                        server(snapshot("Template too old to copy")),
                     ),
                     entry(
                         RemoteAction::Remove,
@@ -397,7 +391,6 @@ impl LocationDialog {
     }
 
     pub(in crate::client::shell) fn select_row(&mut self, row: ListRow) {
-        self.location_missing = false;
         match row {
             ListRow::Add => self.view.add_selected = true,
             ListRow::Local => {
@@ -770,11 +763,7 @@ impl ClientShellState {
     /// is shown.
     fn view_dialog_mut(&mut self) -> Option<&mut LocationDialog> {
         match self.overlay.as_mut() {
-            Some(ClientShellOverlay::Locations(dialog))
-                if !matches!(dialog.kind, LocationDialogKind::New) =>
-            {
-                Some(dialog)
-            }
+            Some(ClientShellOverlay::Locations(dialog)) => Some(dialog),
             _ => None,
         }
     }

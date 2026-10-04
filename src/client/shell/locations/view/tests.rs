@@ -44,8 +44,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
             "Edit…".into(),
             "Use as default".into(),
             "Hide from sidebar".into(),
-            "Save as image…".into(),
-            "Fork…".into(),
+            "Copy machine…".into(),
             "Delete machine…".into(),
         ];
         rest.retain(|item| !item.is_empty());
@@ -115,7 +114,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
         (facts(RemoteKind::Hangar, Some(Stopping)), {
             let mut all = vec![format!("Start!{}", wait(Stopping))];
             all.extend(rest(stopped_test));
-            for item in &mut all[5..7] {
+            for item in &mut all[5..6] {
                 *item = format!("{item}!{}", wait(Stopping));
             }
             all
@@ -126,7 +125,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
                 format!("Stop…!{}", wait(Starting)),
             ];
             all.extend(rest(stopped_test));
-            for item in &mut all[6..8] {
+            for item in &mut all[6..7] {
                 *item = format!("{item}!{}", wait(Starting));
             }
             all
@@ -134,14 +133,14 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
         (facts(RemoteKind::Hangar, Some(Suspending)), {
             let mut all = vec![format!("Resume!{}", wait(Suspending))];
             all.extend(rest(stopped_test));
-            for item in &mut all[5..7] {
+            for item in &mut all[5..6] {
                 *item = format!("{item}!{}", wait(Suspending));
             }
             all
         }),
         (facts(RemoteKind::Hangar, Some(Deleting)), {
             let mut all = rest(stopped_test);
-            for item in &mut all[4..7] {
+            for item in &mut all[4..6] {
                 *item = format!("{item}!{}", wait(Deleting));
             }
             all
@@ -162,8 +161,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
                 "Edit…",
                 "Use as default!Already the default for new workspaces",
                 "Show in sidebar",
-                "Save as image…!Template too old for images",
-                "Fork…!Template too old to fork",
+                "Copy machine…!Template too old to copy",
                 "Delete machine…",
             ]),
         ),
@@ -178,8 +176,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
                 "Edit…".into(),
                 "Use as default".into(),
                 "Hide from sidebar".into(),
-                format!("Save as image…!{SIGN_IN_FIRST}"),
-                format!("Fork…!{SIGN_IN_FIRST}"),
+                format!("Copy machine…!{SIGN_IN_FIRST}"),
                 format!("Delete machine…!{SIGN_IN_FIRST}"),
             ],
         ),
@@ -195,8 +192,7 @@ fn actions_follow_the_remote_type_hide_by_state_and_dim_with_a_reason() {
                 "Edit…".into(),
                 "Use as default".into(),
                 "Hide from sidebar".into(),
-                format!("Save as image…!{OFFLINE}"),
-                format!("Fork…!{OFFLINE}"),
+                format!("Copy machine…!{OFFLINE}"),
                 format!("Delete machine…!{OFFLINE}"),
             ],
         ),
@@ -527,17 +523,14 @@ fn a_dimmed_action_says_why_and_runs_nothing() {
         },
     );
     dialog.view.focus = Focus::Actions;
-    dialog.view.action = Some(RemoteAction::SaveImage);
+    dialog.view.action = Some(RemoteAction::Copy);
     key(&mut state, KeyCode::Enter);
     let dialog = current(&state);
-    assert_eq!(
-        dialog.message,
-        "Save as image: Template too old for images."
-    );
+    assert_eq!(dialog.message, "Copy machine: Template too old to copy.");
     assert!(matches!(dialog.kind, LocationDialogKind::Manage));
     assert!(state.locations.job.is_none());
     let text = screen(&state, 120, 40);
-    assert!(text.contains("↳ Template too old for images"), "{text}");
+    assert!(text.contains("↳ Template too old to copy"), "{text}");
     // A stopping machine: Start is shown, dimmed until the stop finishes.
     let mut state = remotes_shell();
     *current_mut(&mut state) = hangar_dialog_with(MachineState::Stopping, false);
@@ -722,8 +715,10 @@ fn images_view_explains_how_to_save_an_image_when_there_is_none() {
     with_images(&mut state, Vec::new());
     let text = screen(&state, 120, 40);
     assert!(text.contains("No images yet."), "{text}");
-    assert!(text.contains("Save as image…"), "{text}");
-    assert!(text.contains("on the remotes tab"), "{text}");
+    assert!(
+        text.contains("remotes tab and choose Copy machine… → Save as"),
+        "{text}"
+    );
     current_mut(&mut state).view.images =
         Some(Err("Sign in on the account tab to list your images.".into()));
     assert!(screen(&state, 120, 40).contains("Sign in on the account tab"));
@@ -878,7 +873,7 @@ fn screen(state: &ClientShellState, width: u16, height: u16) -> String {
         .join("\n")
 }
 
-/// A dialog with details, a forked machine and usage, as Settings shows them.
+/// A dialog with details, a machine and usage, as Settings shows them.
 fn rich_shell() -> ClientShellState {
     let mut state = remotes_shell();
     let dialog = current_mut(&mut state);
@@ -947,7 +942,6 @@ fn the_remotes_tab_renders_list_details_and_one_column_of_actions() {
         "Machine status",
         "Machine ",
         "Connection",
-        "Copy",
         "1-3",
         "●",
         "◐",
@@ -959,7 +953,7 @@ fn the_remotes_tab_renders_list_details_and_one_column_of_actions() {
     let pane = details_pane(&text);
     let start = pane.iter().position(|line| line == "▸ Suspend…").unwrap();
     assert_eq!(
-        pane[start..start + 13],
+        pane[start..start + 12],
         [
             "▸ Suspend…",
             "Stop…",
@@ -969,8 +963,7 @@ fn the_remotes_tab_renders_list_details_and_one_column_of_actions() {
             "Use as default",
             "Hide from sidebar",
             "",
-            "Save as image…",
-            "Fork…",
+            "Copy machine…",
             "",
             "Delete machine…",
             "",
@@ -1000,7 +993,7 @@ fn ssh_local_and_stopped_details_show_only_their_actions() {
             "Remove remote"
         ]
     );
-    assert!(!text.contains("Save as image"), "{text}");
+    assert!(!text.contains("Copy machine"), "{text}");
     current_mut(&mut state).location = 0;
     let text = screen(&state, 120, 40);
     assert!(text.contains("Local · this computer"), "{text}");
@@ -1145,7 +1138,7 @@ fn render_snapshots() {
     println!("remotes, local (120x40):\n{}", screen(&state, 120, 40));
     // Small terminal.
     let mut state = rich_shell();
-    current_mut(&mut state).view.action = Some(RemoteAction::Fork);
+    current_mut(&mut state).view.action = Some(RemoteAction::Copy);
     println!("remotes, 60x18:\n{}", screen(&state, 60, 18));
     // Images.
     let mut state = rich_shell();
@@ -1207,4 +1200,270 @@ fn bytes_and_dates_read_naturally() {
     assert_eq!(bytes(4 << 30), "4.0 GiB");
     assert_eq!(bytes(1536 << 20), "1.5 GiB");
     assert_eq!(date("2026-10-03T08:00:00Z"), "2026-10-03");
+}
+
+/// Copy machine… on box, opened from its action.
+fn copy_chooser_shell() -> ClientShellState {
+    let mut state = rich_shell();
+    state.locations.save_checker = Some(|_| {
+        Err(crate::hangar::api::HangarError::Invalid(
+            "offline in tests".into(),
+        ))
+    });
+    current_mut(&mut state).view.action = Some(RemoteAction::Copy);
+    key(&mut state, KeyCode::Enter);
+    state
+}
+
+fn copy_of(state: &ClientShellState) -> &super::super::CopyRequest {
+    let LocationDialogKind::Copy(request) = &current(state).kind else {
+        panic!("copy machine");
+    };
+    request
+}
+
+#[test]
+fn copy_machine_chooses_between_clone_and_image_then_shows_that_form_and_goes_back() {
+    use super::super::CopyChoice;
+    use crate::client::locations::hangar::SnapshotUse;
+    let mut state = copy_chooser_shell();
+    let request = copy_of(&state);
+    assert!(!request.chosen);
+    assert_eq!(request.choice, CopyChoice::Clone, "clone first");
+    assert_eq!(current(&state).title(), "copy box");
+    assert!(current(&state).labels().is_empty());
+    assert!(
+        state.locations.image_check.is_none(),
+        "nothing is checked yet"
+    );
+    // ←/→ (and h/l, tab) switch.
+    for (code, expected) in [
+        (KeyCode::Right, CopyChoice::Image),
+        (KeyCode::Left, CopyChoice::Clone),
+        (KeyCode::Char('l'), CopyChoice::Image),
+        (KeyCode::Tab, CopyChoice::Clone),
+    ] {
+        key(&mut state, code);
+        assert_eq!(copy_of(&state).choice, expected, "{code:?}");
+    }
+    // ↵ continues to the clone form, which checks the machine.
+    key(&mut state, KeyCode::Enter);
+    assert!(copy_of(&state).chosen);
+    assert_eq!(current(&state).labels(), ["Name"]);
+    assert_eq!(current(&state).fields[0].as_str(), "box-clone");
+    assert!(matches!(
+        state.locations.image_check,
+        Some((_, SnapshotUse::Fork, _))
+    ));
+    let text = screen(&state, 120, 40);
+    assert!(text.contains("clone box"), "{text}");
+    assert!(text.contains("Name: box-clone"), "{text}");
+    assert!(text.contains("esc back"), "{text}");
+    // ←/→ edit the name here instead of switching.
+    key(&mut state, KeyCode::Left);
+    assert!(copy_of(&state).chosen);
+    // Esc goes back to the chooser with the choice kept.
+    key(&mut state, KeyCode::Esc);
+    assert!(!copy_of(&state).chosen);
+    assert_eq!(copy_of(&state).choice, CopyChoice::Clone);
+    assert!(state.locations.image_check.is_none());
+    assert!(current(&state).fields.is_empty());
+    // The image form: name and description.
+    key(&mut state, KeyCode::Right);
+    key(&mut state, KeyCode::Enter);
+    assert!(copy_of(&state).chosen);
+    assert_eq!(current(&state).title(), "save box as image");
+    assert_eq!(current(&state).labels(), ["Image name", "Description"]);
+    assert!(matches!(
+        state.locations.image_check,
+        Some((_, SnapshotUse::Image, _))
+    ));
+    key(&mut state, KeyCode::Esc);
+    assert_eq!(copy_of(&state).choice, CopyChoice::Image);
+    // Esc in the chooser returns to the remotes tab with the selection kept.
+    key(&mut state, KeyCode::Esc);
+    let dialog = current(&state);
+    assert!(matches!(dialog.kind, LocationDialogKind::Manage));
+    assert_eq!(dialog.profile().unwrap().label, "box");
+    assert_eq!(dialog.view.focus, Focus::Actions);
+    assert_eq!(dialog.view.action, Some(RemoteAction::Copy));
+    assert_eq!(dialog.view.tab, RemotesTab::Remotes);
+}
+
+#[test]
+fn copy_machine_columns_are_clicked_to_choose_and_again_to_continue() {
+    use super::super::CopyChoice;
+    let column = |state: &mut ClientShellState, index: usize| {
+        state.compose(120, 40).unwrap();
+        let (rect, _) = *state
+            .hits
+            .settings_choices
+            .iter()
+            .find(|(_, choice)| *choice == index)
+            .unwrap_or_else(|| panic!("column {index} is not shown"));
+        click_at(state, rect);
+    };
+    let mut state = copy_chooser_shell();
+    column(&mut state, 1);
+    assert_eq!(copy_of(&state).choice, CopyChoice::Image);
+    assert!(!copy_of(&state).chosen);
+    column(&mut state, 0);
+    assert_eq!(copy_of(&state).choice, CopyChoice::Clone);
+    column(&mut state, 0);
+    assert!(copy_of(&state).chosen, "a second click continues");
+    // The cancel button of the form goes back to the chooser, and then to the tab.
+    state.compose(120, 40).unwrap();
+    let cancel = state.hits.overlay_cancel;
+    click_at(&mut state, cancel);
+    assert!(!copy_of(&state).chosen);
+    state.compose(120, 40).unwrap();
+    let primary = state.hits.overlay_primary;
+    click_at(&mut state, primary);
+    assert!(copy_of(&state).chosen, "↵ continue");
+    state.compose(120, 40).unwrap();
+    let cancel = state.hits.overlay_cancel;
+    click_at(&mut state, cancel);
+    state.compose(120, 40).unwrap();
+    let cancel = state.hits.overlay_cancel;
+    click_at(&mut state, cancel);
+    assert!(matches!(current(&state).kind, LocationDialogKind::Manage));
+}
+
+#[test]
+fn the_copy_chooser_compares_clone_and_image_side_by_side() {
+    use crate::client::shell::render::{CHECK, COPY_TABLE, CROSS};
+    assert_eq!(display_width(CHECK), 1);
+    assert_eq!(display_width(CROSS), 1);
+    // Clone copies everything; an image only the root disk.
+    assert!(COPY_TABLE.iter().all(|(_, clone, _)| *clone));
+    assert_eq!(
+        COPY_TABLE
+            .iter()
+            .filter(|(_, _, image)| !image)
+            .map(|(row, _, _)| *row)
+            .collect::<Vec<_>>(),
+        ["Repos & home files", "Logins (gh, claude)"]
+    );
+    let mut state = copy_chooser_shell();
+    let text = screen(&state, 120, 40);
+    println!("copy chooser (120x40):\n{text}");
+    for part in [
+        "copy box",
+        "▸ Clone now",
+        "Save as image",
+        "a second machine",
+        "exactly like this one",
+        "a starting point for",
+        "new machines",
+        "Clone",
+        "Image",
+        "Installed software",
+        "System settings",
+        "Repos & home files",
+        "Logins (gh, claude)",
+        "new machine",
+        "reusable image",
+        "↵ continue",
+        "←→ switch",
+        "esc cancel",
+    ] {
+        assert!(text.contains(part), "{part}\n{text}");
+    }
+    // The chooser stays clean: the stop is explained in the second step.
+    assert!(!text.contains("stopped"), "{text}");
+    let row = |text: &str, label: &str| {
+        text.lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label}\n{text}"))
+            .to_owned()
+    };
+    for (label, clone, image) in COPY_TABLE {
+        let line = row(&text, label);
+        let marks: Vec<char> = line.chars().filter(|c| *c == '✓' || *c == '✗').collect();
+        let expected: Vec<char> = [clone, image]
+            .iter()
+            .map(|included| if *included { '✓' } else { '✗' })
+            .collect();
+        assert_eq!(marks, expected, "{line}");
+    }
+    // ✓ is green, ✗ dim.
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buffer = Buffer::empty(area);
+    crate::client::shell::render::render_locations(
+        &mut buffer,
+        current(&state),
+        &state.config.palette,
+    )
+    .unwrap();
+    let palette = &state.config.palette;
+    for y in 0..40 {
+        for x in 0..120 {
+            match buffer[(x, y)].symbol() {
+                "✓" => assert_eq!(buffer[(x, y)].fg, palette.green),
+                "✗" => assert_eq!(buffer[(x, y)].fg, palette.overlay0),
+                _ => {}
+            }
+        }
+    }
+    key(&mut state, KeyCode::Right);
+    let text = screen(&state, 120, 40);
+    assert!(text.contains("▸ Save as image"), "{text}");
+    // Small terminals stack the choices and keep the table readable.
+    let text = screen(&state, 44, 20);
+    println!("copy chooser (44x20):\n{text}");
+    for part in [
+        "Clone now",
+        "▸ Save as image",
+        "Installed software",
+        "✓",
+        "✗",
+    ] {
+        assert!(text.contains(part), "{part}\n{text}");
+    }
+    assert!(text.contains("↵ continue"), "{text}");
+    state.compose(44, 20).unwrap();
+    // Very small: nothing panics.
+    for (width, height) in [(30, 12), (26, 9), (20, 6)] {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        let _ = crate::client::shell::render::render_locations(
+            &mut buffer,
+            current(&state),
+            &state.config.palette,
+        );
+        state.compose(width, height).unwrap();
+    }
+}
+
+#[test]
+fn copy_forms_render_with_their_state_handling() {
+    use crate::client::locations::hangar::{SaveCheck, SavePlan};
+    let mut state = copy_chooser_shell();
+    key(&mut state, KeyCode::Enter);
+    let epoch = state.locations.epoch;
+    let (send, receive) = mpsc::channel();
+    state.locations.image_check = Some((
+        epoch,
+        crate::client::locations::hangar::SnapshotUse::Fork,
+        receive,
+    ));
+    send.send(Ok(SaveCheck {
+        plan: Some(SavePlan::Stop),
+        note: "box is running. Only a stopped machine can be cloned. Stop machine and clone stops all sessions and jobs on it (as Stop machine… does), waits until it is stopped, then clones it.".into(),
+    }))
+    .unwrap();
+    state.tick_locations(&mut ClientShellInput::default());
+    let text = screen(&state, 120, 40);
+    println!("clone form (120x40):\n{text}");
+    assert!(text.contains("↵ stop machine and clone"), "{text}");
+    assert!(text.contains("This machine is stopped first"), "{text}");
+    key(&mut state, KeyCode::Esc);
+    key(&mut state, KeyCode::Right);
+    key(&mut state, KeyCode::Enter);
+    let text = screen(&state, 120, 40);
+    println!("image form, checking (120x40):\n{text}");
+    assert!(text.contains("Image name:"), "{text}");
+    assert!(text.contains("Description:"), "{text}");
+    assert!(text.contains("Checking box…"), "{text}");
+    println!("image form (60x18):\n{}", screen(&state, 60, 18));
 }

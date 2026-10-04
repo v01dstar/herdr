@@ -301,6 +301,9 @@ pub(super) enum ClientRenameTarget {
         source_workspace_id: Option<String>,
         cwd: Option<String>,
         suggested_name: String,
+        /// Another machine than the displayed one (the default machine); `None` creates
+        /// on the displayed one.
+        destination: Option<Box<super::locations::WorkspaceDestination>>,
     },
     Workspace {
         workspace_id: String,

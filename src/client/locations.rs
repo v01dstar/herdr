@@ -782,7 +782,7 @@ fn quiesce_machine(
     Ok(warnings)
 }
 
-/// Save as image…: brings the machine to a stopped, uploaded state as `plan` says
+/// Copy machine… → Save as image: brings the machine to a stopped, uploaded state as `plan` says
 /// (the stop is the same as Stop machine), then saves its root disk as an image.
 pub(super) fn save_image_remote(
     profile: &SavedSshEndpoint,
@@ -794,7 +794,7 @@ pub(super) fn save_image_remote(
     let cloud = options
         .cloud
         .as_ref()
-        .ok_or("Save as image requires a hangar machine")?;
+        .ok_or("Copy machine requires a hangar machine")?;
     validate_binding(profile, Some(cloud))?;
     hangar::validate_image_name(name)?;
     let mut warnings = Vec::new();
@@ -816,7 +816,7 @@ pub(super) fn save_image_remote(
     })?;
     let machine = &cloud.hangar().machine_name;
     let mut message = format!(
-        "Saved image {} from {machine}. Choose it as Source in Add remote → Create new machine.",
+        "Saved image {} from {machine}. It is listed on the images tab; New machine from image… starts machines from it.",
         image.name
     );
     if plan != hangar::SavePlan::Save {
@@ -828,9 +828,9 @@ pub(super) fn save_image_remote(
     Ok(with_warnings(message, &warnings))
 }
 
-/// Fork machine…: brings the machine to a stopped, uploaded state as `plan` says (the
-/// stop is the same as Stop machine), forks it, then lists and connects the running
-/// fork as Create new machine does. The source stays stopped.
+/// Copy machine… → Clone now: brings the machine to a stopped, uploaded state as `plan`
+/// says (the stop is the same as Stop machine), clones it with hangar's fork, then lists
+/// and connects the running clone as Create new machine does. The source stays stopped.
 pub(super) fn fork_remote(
     profile: &SavedSshEndpoint,
     options: &RemoteOptions,
@@ -840,7 +840,7 @@ pub(super) fn fork_remote(
     let cloud = options
         .cloud
         .as_ref()
-        .ok_or("Fork machine requires a hangar machine")?;
+        .ok_or("Copy machine requires a hangar machine")?;
     validate_binding(profile, Some(cloud))?;
     hangar::validate_fork_name(name)?;
     let mut warnings = Vec::new();
@@ -855,15 +855,20 @@ pub(super) fn fork_remote(
         },
         &mut progress,
     )
-    .map_err(|error| format!("Could not fork into {name}: {}", hangar::fork_error(&error)))?;
+    .map_err(|error| {
+        format!(
+            "Could not clone into {name}: {}",
+            hangar::fork_error(&error)
+        )
+    })?;
     if plan != hangar::SavePlan::Save {
         record_state_best_effort(cloud.hangar(), crate::hangar::api::MachineState::Stopped);
     }
     let source = &cloud.hangar().machine_name;
     let added = hangar::adopt_machine(&cloud.hangar().server, &fork, &mut progress)
-        .map_err(|error| format!("Forked {source} into {}. {error}", fork.name))?;
+        .map_err(|error| format!("Cloned {source} into {}. {error}", fork.name))?;
     let message = format!(
-        "Forked {source} into {}. {added} {source} stays stopped; use Start remote to work on it again.",
+        "Cloned {source} into {}. {added} {source} stays stopped; use Start remote to work on it again.",
         fork.name
     );
     Ok(with_warnings(message, &warnings))
@@ -1042,6 +1047,8 @@ pub(crate) fn forget_machine_files(binding: &HangarBinding) {
     }
 }
 
+// Unit tests replace the call so they never reach another machine's server.
+#[cfg_attr(test, allow(dead_code))]
 pub(super) fn create_workspace(
     profile: Option<&SavedSshEndpoint>,
     options: &RemoteOptions,

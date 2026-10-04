@@ -19,15 +19,17 @@ Herdr 会请求 SSH 压缩，以减少受限连接上的屏幕更新流量。这
 
 Remote 在 Settings 中排在其他设置之后的三个标签页中配置：**remotes**、**images** 和 **account**（完整的标签行为 `theme  indicators  sound  toasts  integrations  remotes  images  account`）。右上角显示当前登录的 hangar 用户。终端较窄时标签行会滚动，始终显示当前打开的标签页，并用 `‹` 和 `›` 标出被隐藏的标签页。Remote 弹窗比其他标签页高几行，以便放下机器的全部操作。
 
-**remotes** 标签页依次列出 Local、hangar 机器和 SSH Remote，最后是 **+ Add remote**。Remote 的名称前带有 `⇄`（Local 没有），右侧以文字显示状态：**running**（绿色），**stopped** 或 **suspended**（暗色），**starting…**、**stopping…** 等过渡状态（黄色），**error**（红色），**unknown**，SSH Remote 则显示 **connected**、**disabled** 或 **offline**。无法访问 hangar 或未登录时，状态显示为 **offline** 或 **signed out**，表示最后一次同步的状态。**default**、**hidden** 等标注显示在状态之前。右侧窗格以 `name · hangar|ssh · state` 的形式显示选中的 Remote，下方显示 hangar 报告的模板、规格，以及派生来源机器或创建所用镜像（处于错误状态的机器还会显示最后一次错误）。再往下是单列操作，各组之间以空行分隔：**Start** 或 **Resume**、**Suspend…**、**Stop…**；然后是 **Test connection**、**Edit…**、**Use as default**、**Hide from sidebar**（或 **Show in sidebar**），SSH Remote 还有 **Start session**；然后是 **Save as image…** 和 **Fork…**；最后是 **Delete machine…** 或 **Remove remote**。只显示适用于该类 Remote 的操作：SSH Remote 没有启停和复制操作，Local 只提供 **Use as default**。启停操作随状态变化：已停止时为 **Start**，已挂起时为 **Resume**，运行中为 **Suspend…** 和 **Stop…**，出错时为 **Start** 和 **Stop…**。处于过渡状态时，下一步可用的操作会变暗显示，直到过渡完成。适用但因其他原因暂不可用的操作会变暗，选中后在列表下方说明原因，例如 **Template too old for images**、**Sign in on the account tab first** 或无法访问 hangar。标签页打开期间列表会自动刷新，因此没有单独的状态操作。
+**remotes** 标签页依次列出 Local、hangar 机器和 SSH Remote，最后是 **+ Add remote**。Remote 的名称前带有 `⇄`（Local 没有），右侧以文字显示状态：**running**（绿色），**stopped** 或 **suspended**（暗色），**starting…**、**stopping…** 等过渡状态（黄色），**error**（红色），**unknown**，SSH Remote 则显示 **connected**、**disabled** 或 **offline**。无法访问 hangar 或未登录时，状态显示为 **offline** 或 **signed out**，表示最后一次同步的状态。**default**、**hidden** 等标注显示在状态之前。右侧窗格以 `name · hangar|ssh · state` 的形式显示选中的 Remote，下方显示 hangar 报告的模板、规格，以及克隆来源机器或创建所用镜像（处于错误状态的机器还会显示最后一次错误）。再往下是单列操作，各组之间以空行分隔：**Start** 或 **Resume**、**Suspend…**、**Stop…**；然后是 **Test connection**、**Edit…**、**Use as default**、**Hide from sidebar**（或 **Show in sidebar**），SSH Remote 还有 **Start session**；然后是 **Copy machine…**；最后是 **Delete machine…** 或 **Remove remote**。只显示适用于该类 Remote 的操作：SSH Remote 没有启停和复制操作，Local 只提供 **Use as default**。启停操作随状态变化：已停止时为 **Start**，已挂起时为 **Resume**，运行中为 **Suspend…** 和 **Stop…**，出错时为 **Start** 和 **Stop…**。处于过渡状态时，下一步可用的操作会变暗显示，直到过渡完成。适用但因其他原因暂不可用的操作会变暗，选中后在列表下方说明原因，例如 **Template too old to copy**、**Sign in on the account tab first** 或无法访问 hangar。标签页打开期间列表会自动刷新，因此没有单独的状态操作。
 
-点击标签页即可打开，点击 Remote 即可选中，点击操作即可执行。使用键盘时，与其他标签页一样，←/→（也可用 **h**/**l**、**Tab**/**Shift+Tab**）在所有 settings 标签页之间切换。在 remotes 和 images 标签页中，↑/↓（或 **k**/**j**）在当前焦点窗格内移动，**Enter** 从列表进入操作并执行选中的操作，**Esc** 返回列表；在列表中按 **Esc** 关闭 Settings。底部一行会显示这些按键。表单和确认（添加或编辑 Remote、停止、挂起、删除、保存镜像、派生、退出登录）以弹窗打开，关闭后会回到原来的标签页，并保持之前选中的 Remote 和操作。
+点击标签页即可打开，点击 Remote 即可选中，点击操作即可执行。使用键盘时，与其他标签页一样，←/→（也可用 **h**/**l**、**Tab**/**Shift+Tab**）在所有 settings 标签页之间切换。在 remotes 和 images 标签页中，↑/↓（或 **k**/**j**）在当前焦点窗格内移动，**Enter** 从列表进入操作并执行选中的操作，**Esc** 返回列表；在列表中按 **Esc** 关闭 Settings。底部一行会显示这些按键。表单和确认（添加或编辑 Remote、停止、挂起、删除、复制机器、退出登录）以弹窗打开，关闭后会回到原来的标签页，并保持之前选中的 Remote 和操作。
 
 选择 **+ Add remote → Provider: SSH** 手动添加 SSH 位置，填写显示名称、SSH 地址或别名、固定的 Herdr session 名称，以及远端默认目录。远端应已安装兼容版本的 Herdr，并配置好无需交互的 SSH 认证。**Test connection** 检查 SSH 和运行中的 Herdr session；**Start session** 启动已安装的 session 并启用该 Remote，不安装或替换远端软件。
 
-选中 Local 或某个 Remote，点击 **Use as default**。保存 Remote 后，**New workspace** 弹窗包含名称、位置和目录。默认位置独立于当前显示的机器；切换位置会重置为该机器的默认目录，留空时由目标服务器选择。一个 workspace 的所有 tab 和 pane 都在同一台机器运行，一个远端 session 可以包含多个 workspace。
+选中 Local 或某个 Remote，点击 **Use as default**。**New workspace**（快捷键、侧边栏的 **new workspace** 或移动端菜单）不再询问位置，而是直接在默认机器（未设置时为 Local）上、以该机器的默认目录创建 workspace；目录留空时由目标服务器选择。默认位置独立于当前显示的机器。设置 `prompt_new_workspace_name = true` 时，会像单机时一样先询问名称。一个 workspace 的所有 tab 和 pane 都在同一台机器运行，一个远端 session 可以包含多个 workspace。
 
-创建在后台执行。提交后关闭弹窗不会撤销已接受的创建；超时可能意味着结果未知，应先检查目标机器的 workspace 列表再重试。Herdr 不会自动重复发送创建请求。
+New workspace 不会启动机器。默认机器已停止、正在连接、已禁用或已从侧边栏隐藏时，Herdr 会显示类似“Default machine box isn't connected — start it in Settings → remotes, or choose another default”的提示，并且不创建任何内容。要在其他机器上创建 workspace，请先对该机器选择 **Use as default**，或运行 `herdr --machine <label-or-id> workspace create`。
+
+在当前显示之外的机器上，创建在后台执行，新 workspace 出现在该机器的列表中后会自动获得焦点；如果期间切换了机器或打开了弹窗，则不会抢占焦点。超时可能意味着结果未知，应先检查目标机器的 workspace 列表再重试。Herdr 不会自动重复发送创建请求。
 
 ### hangar 机器
 
@@ -43,25 +45,37 @@ Herdr 只为每台机器保存本地偏好：显示名称（**Edit…**；hangar
 
 Herdr 通过 hangar SSH 网关连接机器。它在 state 目录的 `client/hangar/ssh/` 中保存自己的 SSH 密钥和短期证书（4 小时），网关设置只写入临时 SSH 配置，不会修改 `~/.ssh/config`。hangar 机器的 SSH 目标是别名 `hangar-<machine ID>`。每次建立新连接前，Herdr 会确认机器正在运行，并在证书剩余时间不足 15 分钟时续期。连接复用保持开启：机器停止时网关会关闭现有连接，因此重连不会复用指向旧 runtime 的连接。
 
-Herdr 不会隐式启动机器。机器停止时，重连、**Test connection**、**New workspace** 和 `herdr --machine` 会提示“use Start remote”。remotes 标签页会显示每台机器的状态。**Start** 启动机器，等待就绪后启动已保存的 Herdr session。**Stop…** 需要确认，因为它会停止该机器上的**全部 session 和任务**：先阻止该机器重连，尝试关闭其 Herdr session，再停止机器。持久磁盘上的文件保留，运行中的进程不会保留。**Suspend…** 确认后会阻止该机器重连，并把机器内存保存为快照；其中的 Herdr session 保持运行，运行中的程序也会保留。挂起的机器显示为 **suspended**，**Start** 变为 **Resume**；恢复时会还原快照并重连。重连和 **Test connection** 永远不会恢复机器。登录过期时显示 **Sign in to hangar**；无权使用的机器显示“not allowed on this server”，不会要求重新登录。
+Herdr 不会隐式启动机器。机器停止时，重连、**Test connection** 和 `herdr --machine` 会提示“use Start remote”，**New workspace** 则显示提示且不创建任何内容。remotes 标签页会显示每台机器的状态。**Start** 启动机器，等待就绪后启动已保存的 Herdr session。**Stop…** 需要确认，因为它会停止该机器上的**全部 session 和任务**：先阻止该机器重连，尝试关闭其 Herdr session，再停止机器。持久磁盘上的文件保留，运行中的进程不会保留。**Suspend…** 确认后会阻止该机器重连，并把机器内存保存为快照；其中的 Herdr session 保持运行，运行中的程序也会保留。挂起的机器显示为 **suspended**，**Start** 变为 **Resume**；恢复时会还原快照并重连。重连和 **Test connection** 永远不会恢复机器。登录过期时显示 **Sign in to hangar**；无权使用的机器显示“not allowed on this server”，不会要求重新登录。
 
 共享本地 Herdr state 目录的客户端会串行修改 Remote 设置，机器操作由 hangar 服务器串行执行。其他客户端修改连接目标后，需要重新打开弹窗才可操作新目标。SSH Remote 上的 **Remove remote** 只删除本地连接设置。hangar 机器无法仅从 Herdr 中移除，因此没有 **Remove remote**：**Delete machine…** 会先确认并列出机器名，确认后永久删除机器及其磁盘和快照，Herdr 随即清除其偏好、证书和连接缓存。如果 hangar 中机器已被删除，Herdr 只做本地清理；其他失败会让机器保留在列表中，便于重试。在终端中，`herdr machine remove <profile-id> --delete-machine` 执行相同操作；不带该参数时会拒绝，并说明删除与隐藏的区别（`herdr machine disable <profile-id>` 隐藏 hangar 机器，`enable` 重新显示，`rename` 设置 Herdr 中的显示名称）。SSH catalog（`client/endpoints.json`）保持 generation-one 兼容，只保存 SSH Remote；hangar 机器的偏好保存在 `client/locations.json`，最后一次获取的机器列表保存在 `client/hangar-machines.json`。旧版 Herdr 保存的 hangar Remote 会在升级时转换，并保留其端点 ID（因此打开的工作区和 session 状态得以保留）、名称、session 和默认目录。之前通过 Instacloud 集成创建的 Remote 会在升级时被禁用，其 profile 和默认目录会保留，可自行删除。
 
-#### 镜像
+#### 复制机器
 
-镜像保存机器的根磁盘，之后可以基于它创建新机器。在 hangar Remote 上选择 **Save as image…**，输入名称（小写字母、数字和 `-`）和可选描述后确认。只保存根磁盘：已安装的软件包和系统配置会包含在内，但主目录（`/data/home`）中的文件、保存在其中的登录信息（gh、Claude、Codex、git、SSH）以及 `/data/workspace` 不会包含。写入根磁盘的任何内容都会包含在内，例如 `sudo gh auth` 的凭据或 `/etc/environment` 中的令牌，请在保存前删除。镜像仅对你的 hangar 账号可见。
+在 hangar Remote 上选择 **Copy machine…**，可以创建克隆或镜像。它会打开一个选择界面，并排显示两个选项，并用表格说明各自复制的内容：
 
-只能保存已停止的机器。对于运行中的机器，弹窗会提供 **Stop machine and save**：它按 **Stop…** 的相同步骤停止机器（阻止重连、关闭 Herdr session、停止机器），然后保存镜像；已挂起的机器会先恢复再停止。保存后机器保持停止状态，如需继续使用请点击 **Start**。由不支持重置机器身份的旧模板创建的机器无法保存，弹窗会说明这一点；请用最新模板创建新机器，配置好后再保存。
+|                     | Clone now   | Save as image  |
+| ------------------- | ----------- | -------------- |
+| Installed software  | ✓           | ✓              |
+| System settings     | ✓           | ✓              |
+| Repos & home files  | ✓           | ✗              |
+| Logins (gh, claude) | ✓           | ✗              |
+| Result              | new machine | reusable image |
 
-**images** 标签页按从新到旧列出你的镜像及其创建日期。选中一个镜像可查看描述、创建日期、来源机器、模板和大小，并可选择 **New machine from image…**（打开 **Add remote** 并把该镜像选为 **Source**）或 **Delete image…**。还没有镜像时，标签页会说明如何保存镜像。
+用 ←/→ 或点击某一列进行选择，按 **Enter**（或再次点击）进入该选项的表单。在表单中按 **Esc** 返回选择界面；在选择界面中按 **Esc** 返回 remotes 标签页，并保持之前选中的 Remote 和操作。
+
+两者都需要已停止的机器。对于运行中的机器，表单会提供 **Stop machine and clone** 或 **Stop machine and save**：它按 **Stop…** 的相同步骤停止机器（阻止重连、关闭 Herdr session、停止机器），然后进行复制；已挂起的机器会先恢复再停止。复制后机器保持停止状态，如需继续使用请点击 **Start**。由不支持重置机器身份的旧模板创建的机器无法复制（**Template too old to copy**），表单会说明这一点；请用最新模板创建新机器，配置好后再复制。
+
+##### 克隆
+
+**Clone now** 会创建一台与当前机器完全相同的第二台机器：同时复制根磁盘**和** `/data` 磁盘。输入新机器的名称（小写字母、数字和 `-`，默认为 `<machine>-clone`）后确认。两块磁盘上的所有内容都会被复制：已安装的软件、系统设置、仓库、主目录（`/data/home`）以及保存在其中的登录信息（如 gh、Claude、Codex 和 SSH 密钥），因此请像对待原机器一样对待克隆机器。克隆机器拥有自己的 SSH 主机密钥、机器 ID 和主机名。Herdr 会等待克隆机器运行并就绪，然后像 **Create new machine** 一样将其加入 remotes 标签页并启动 Herdr session。克隆机器计入 hangar 的机器数量上限。
+
+##### 镜像
+
+**Save as image** 为新机器保存一个起点：只保存机器的根磁盘。输入名称（小写字母、数字和 `-`）和可选描述后确认。已安装的软件和系统设置会包含在内，但主目录（`/data/home`）中的文件、保存在其中的登录信息（gh、Claude、Codex、git、SSH）以及 `/data/workspace` 中的仓库不会包含。写入根磁盘的任何内容都会包含在内，例如 `sudo gh auth` 的凭据或 `/etc/environment` 中的令牌，请在保存前删除。镜像仅对你的 hangar 账号可见。
+
+**images** 标签页按从新到旧列出你的镜像及其创建日期。选中一个镜像可查看描述、创建日期、来源机器、模板和大小，并可选择 **New machine from image…**（打开 **Add remote** 并把该镜像选为 **Source**）或 **Delete image…**。还没有镜像时，标签页会说明如何通过 **Copy machine… → Save as image** 保存镜像。
 
 也可以选择 **+ Add remote → Create new machine**，并在 **Source** 中选择镜像；列表显示每个镜像的名称、创建日期和来源机器。默认来源是最新的 `herdr` 模板。基于镜像创建的机器使用镜像的根磁盘和一个新的空 `/data`，因此需要在新机器上重新登录各工具。将镜像选为来源时，可通过 **Delete image…** 在确认后删除它；已基于该镜像创建的机器不受影响。
-
-#### 派生（Fork）
-
-派生会创建一台完整复制 hangar 机器的新机器：同时复制根磁盘**和** `/data` 磁盘。在 hangar Remote 上选择 **Fork…**，输入新机器的名称（小写字母、数字和 `-`，默认为 `<machine>-fork`）后确认。两块磁盘上的所有内容都会被复制：仓库、主目录（`/data/home`）以及保存在其中的登录信息（如 gh、Claude、Codex 和 SSH 密钥），因此请像对待原机器一样对待派生机器。派生机器拥有自己的 SSH 主机密钥、机器 ID 和主机名。派生机器计入 hangar 的机器数量上限。
-
-只能派生已停止的机器，处理方式与 **Save as image…** 相同：对于运行中的机器，弹窗会提供 **Stop machine and fork**，它按 **Stop…** 的相同步骤停止机器后再派生；已挂起的机器会先恢复再停止；由不支持重置机器身份的旧模板创建的机器无法派生。Herdr 会等待派生机器运行并就绪，然后像 **Create new machine** 一样将其加入列表并启动 Herdr session。原机器保持停止状态，如需继续使用请点击 **Start**。
 
 ## 连接前的准备
 

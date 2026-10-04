@@ -1070,20 +1070,4 @@ mod tests {
         assert!(state.overlay.is_none());
         assert!(outcome.actions.is_empty());
     }
-
-    #[test]
-    fn setup_does_not_disable_new_workspace_on_other_locations() {
-        let mut state = shell_with(form());
-        let (_send, receive) = mpsc::channel();
-        state.locations.add.job = Some(receive);
-        state.close_location();
-        state.open_location_workspace();
-        assert!(matches!(
-            state.overlay,
-            Some(ClientShellOverlay::Locations(LocationDialog {
-                kind: LocationDialogKind::New,
-                ..
-            }))
-        ));
-    }
 }

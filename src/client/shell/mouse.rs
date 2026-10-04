@@ -707,11 +707,33 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .copied()
                 {
-                    if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                        if !dialog.busy {
-                            dialog.selected = index;
-                            if dialog.choice_field(index) {
-                                dialog.cycle_location(1);
+                    let chooser = match self.overlay.as_ref() {
+                        Some(ClientShellOverlay::Locations(dialog)) if !dialog.busy => {
+                            dialog.copy_chooser().map(|request| request.choice)
+                        }
+                        _ => None,
+                    };
+                    match chooser {
+                        // Copy machine…: a click picks a choice; a second click on the
+                        // picked one continues, as ↵ does.
+                        Some(current) => {
+                            let choice = super::locations::CopyChoice::ALL
+                                .get(index)
+                                .copied()
+                                .unwrap_or(current);
+                            if choice == current {
+                                self.accept_location(outcome);
+                            } else {
+                                self.switch_copy_choice(choice);
+                            }
+                        }
+                        None => {
+                            if let Some(ClientShellOverlay::Locations(dialog)) =
+                                self.overlay.as_mut()
+                            {
+                                if !dialog.busy {
+                                    dialog.selected = index;
+                                }
                             }
                         }
                     }

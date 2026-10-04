@@ -19,9 +19,9 @@ The shared connection uses `ControlPersist 600` (10 minutes of idle time); this 
 
 Remotes are configured on three Settings tabs, after the other settings: **remotes**, **images** and **account** (the full tab row is `theme  indicators  sound  toasts  integrations  remotes  images  account`). The signed-in hangar user is shown at the top right. On a narrow terminal the tab row scrolls so the open tab stays visible, with `‹` and `›` marking hidden tabs. The Remotes popup is a few rows taller than the other tabs so a machine's actions fit.
 
-The **remotes** tab lists Local first, then your hangar machines and SSH remotes, then **+ Add remote**. Remotes are marked with `⇄` before the name (Local has no mark), and each shows its state as a word at the right: **running** (green), **stopped** or **suspended** (dim), **starting…**, **stopping…** or another transition (yellow), **error** (red), **unknown**, and for SSH remotes **connected**, **disabled** or **offline**. When hangar cannot be reached or nobody is signed in, the state reads **offline** or **signed out** and is the last synced one. Notes such as **default** and **hidden** appear before the state. The right pane shows the selected remote as `name · hangar|ssh · state`, then its template, size, and the machine it was forked from or the image it was created from, when hangar reports them (and the last error of a machine in error). Below that, its actions are listed in one column, in groups separated by a blank line: **Start** or **Resume**, **Suspend…** and **Stop…**; then **Test connection**, **Edit…**, **Use as default**, **Hide from sidebar** (or **Show in sidebar**) and, for SSH remotes, **Start session**; then **Save as image…** and **Fork…**; then **Delete machine…** or **Remove remote**. Only actions that apply to that kind of remote appear: SSH remotes have no lifecycle or copy actions, and Local only offers **Use as default**. Lifecycle actions follow the state: **Start** for a stopped machine, **Resume** for a suspended one, **Suspend…** and **Stop…** for a running one (**Start** and **Stop…** for one in error). During a transition the next action is shown dimmed until it finishes. An action that applies but is blocked for another reason is dimmed, and selecting it shows why under the list, for example **Template too old for images**, **Sign in on the account tab first**, or that hangar is unreachable. The list refreshes itself while the tab is open, so there is no separate status action.
+The **remotes** tab lists Local first, then your hangar machines and SSH remotes, then **+ Add remote**. Remotes are marked with `⇄` before the name (Local has no mark), and each shows its state as a word at the right: **running** (green), **stopped** or **suspended** (dim), **starting…**, **stopping…** or another transition (yellow), **error** (red), **unknown**, and for SSH remotes **connected**, **disabled** or **offline**. When hangar cannot be reached or nobody is signed in, the state reads **offline** or **signed out** and is the last synced one. Notes such as **default** and **hidden** appear before the state. The right pane shows the selected remote as `name · hangar|ssh · state`, then its template, size, and the machine it was cloned from or the image it was created from, when hangar reports them (and the last error of a machine in error). Below that, its actions are listed in one column, in groups separated by a blank line: **Start** or **Resume**, **Suspend…** and **Stop…**; then **Test connection**, **Edit…**, **Use as default**, **Hide from sidebar** (or **Show in sidebar**) and, for SSH remotes, **Start session**; then **Copy machine…**; then **Delete machine…** or **Remove remote**. Only actions that apply to that kind of remote appear: SSH remotes have no lifecycle or copy actions, and Local only offers **Use as default**. Lifecycle actions follow the state: **Start** for a stopped machine, **Resume** for a suspended one, **Suspend…** and **Stop…** for a running one (**Start** and **Stop…** for one in error). During a transition the next action is shown dimmed until it finishes. An action that applies but is blocked for another reason is dimmed, and selecting it shows why under the list, for example **Template too old to copy**, **Sign in on the account tab first**, or that hangar is unreachable. The list refreshes itself while the tab is open, so there is no separate status action.
 
-Click a tab to open it, a remote to select it and an action to run it. With the keyboard, ←/→ (also **h**/**l**, **Tab**/**Shift+Tab**) switch between all settings tabs, as on the other tabs. On the remotes and images tabs, ↑/↓ (or **k**/**j**) move within the focused pane, **Enter** moves from the list to the actions and runs the selected action, and **Esc** returns to the list; **Esc** on the list closes Settings. The bottom line shows these keys. Forms and confirmations (adding or editing a remote, stopping, suspending, deleting, saving an image, forking, signing out) open as dialogs; when they close, the same tab, remote and action are selected again.
+Click a tab to open it, a remote to select it and an action to run it. With the keyboard, ←/→ (also **h**/**l**, **Tab**/**Shift+Tab**) switch between all settings tabs, as on the other tabs. On the remotes and images tabs, ↑/↓ (or **k**/**j**) move within the focused pane, **Enter** moves from the list to the actions and runs the selected action, and **Esc** returns to the list; **Esc** on the list closes Settings. The bottom line shows these keys. Forms and confirmations (adding or editing a remote, stopping, suspending, deleting, copying a machine, signing out) open as dialogs; when they close, the same tab, remote and action are selected again.
 
 Choose **+ Add remote → Provider: SSH** to add a manual SSH location. Give it a name,
 an SSH target or alias, a fixed Herdr session name, and an optional default
@@ -30,15 +30,25 @@ noninteractive SSH access already configured. **Test connection** checks SSH and
 the running Herdr session; **Start session** starts an installed session and
 enables the remote. These actions do not install or replace remote software.
 
-Select Local or a saved remote and choose **Use as default**. Once a remote is
-saved, **New workspace** opens a dialog with name, location, and directory. This
-default is independent of the machine currently displayed. Changing location
-resets the directory to that machine's configured default; an empty directory
-uses the destination server's default. Every tab and pane in the new workspace
-runs on that same machine. A remote session can contain several workspaces.
+Select Local or a saved remote and choose **Use as default**. **New workspace**
+(the keybinding, the sidebar's **new workspace**, or the mobile menu) creates the
+workspace on the default machine (Local when none is chosen) without asking where,
+in that machine's default directory; an empty directory uses the destination
+server's default. This default is independent of the machine currently displayed.
+With `prompt_new_workspace_name = true`, Herdr asks for the name first, as on a
+single machine. Every tab and pane in the new workspace runs on that same machine.
+A remote session can contain several workspaces.
 
-Creation runs in the background. Closing the dialog after submission does not
-undo an accepted creation. A timeout can leave the result unknown: check the
+New workspace never starts a machine. When the default machine is stopped, still
+connecting, disabled, or hidden from the sidebar, Herdr shows a notice such as
+"Default machine box isn't connected — start it in Settings → remotes, or choose
+another default" and creates nothing. To create a workspace on another machine,
+choose **Use as default** for it first, or run
+`herdr --machine <label-or-id> workspace create`.
+
+On a machine other than the displayed one, creation runs in the background and the
+new workspace is focused once that machine lists it, unless you switched machines
+or opened a dialog meanwhile. A timeout can leave the result unknown: check the
 destination's workspace list before retrying. Herdr never automatically retries
 workspace creation.
 
@@ -56,25 +66,61 @@ To create a machine, choose **Add remote → Provider: hangar**, enter a name, a
 
 Herdr reaches hangar machines through the hangar SSH gateway. It keeps its own SSH key and short-lived certificates (4 hours) in its state directory under `client/hangar/ssh/`, and writes the gateway settings only into its temporary SSH configuration; `~/.ssh/config` is not changed. A hangar machine's SSH target is the alias `hangar-<machine ID>`. Before each new connection Herdr checks that the machine is running and renews the certificate when less than 15 minutes remain. Connection sharing stays on: the gateway closes live connections when a machine stops, so a reconnect never reuses a connection to an old runtime.
 
-Nothing in Herdr starts a machine implicitly. Reconnect, **Test connection**, **New workspace**, and `herdr --machine` fail with "use Start remote" when the machine is stopped. The remotes tab shows each machine's state. **Start** starts the machine, waits until it is ready, and starts the saved Herdr session. **Stop…** asks for confirmation because it stops **all sessions and jobs on that machine**. It keeps the machine from reconnecting, attempts to stop its Herdr session, and then stops the machine. Files on the persistent disk remain; running processes do not survive a stop. **Suspend…** keeps them instead: after confirmation it keeps the machine from reconnecting and saves the machine's memory to a snapshot, leaving its Herdr session running inside. A suspended machine is labelled **suspended**, and **Start** reads **Resume**; resuming restores the snapshot and reconnects. Reconnect and **Test connection** never resume a machine. An expired sign-in shows **Sign in to hangar**; a machine you are not allowed to use shows "not allowed on this server" and does not ask you to sign in again.
+Nothing in Herdr starts a machine implicitly. Reconnect, **Test connection**, and `herdr --machine` fail with "use Start remote" when the machine is stopped, and **New workspace** shows a notice instead of creating anything. The remotes tab shows each machine's state. **Start** starts the machine, waits until it is ready, and starts the saved Herdr session. **Stop…** asks for confirmation because it stops **all sessions and jobs on that machine**. It keeps the machine from reconnecting, attempts to stop its Herdr session, and then stops the machine. Files on the persistent disk remain; running processes do not survive a stop. **Suspend…** keeps them instead: after confirmation it keeps the machine from reconnecting and saves the machine's memory to a snapshot, leaving its Herdr session running inside. A suspended machine is labelled **suspended**, and **Start** reads **Resume**; resuming restores the snapshot and reconnects. Reconnect and **Test connection** never resume a machine. An expired sign-in shows **Sign in to hangar**; a machine you are not allowed to use shows "not allowed on this server" and does not ask you to sign in again.
 
 Remote setting changes are serialized across clients sharing the local Herdr state directory, and the hangar server serializes machine operations. A profile changed by another client must be reopened before an operation can use its new destination. Removing an SSH profile deletes only the local connection settings. A hangar remote is removed together with its machine: **Delete machine…** asks for confirmation naming the machine, then deletes the machine, its disks and snapshots permanently and removes its preferences, certificate and cached connection data. If hangar already deleted the machine, Herdr just cleans up; any other failure keeps the remotes (disabled) so you can retry. From a terminal, `herdr machine remove <profile-id> --delete-machine` does the same; without the flag it refuses. The SSH catalog remains compatible with generation-one clients; directory defaults and hangar bindings are stored separately in `client/locations.json`. Remotes created by the earlier Instacloud integration are disabled on upgrade; their profiles and default directories are kept so you can remove them.
 
-#### Images
+#### Copying a machine
 
-An image saves a machine's root disk so new machines can start from it. Choose **Save as image…** on a hangar remote, enter a name (lowercase letters, digits and `-`) and an optional description, and confirm. Only the root disk is saved: installed packages and system configuration are included, but files in your home directory (`/data/home`), logins kept there (gh, Claude, Codex, git, SSH) and `/data/workspace` are not. Anything written to the root disk is included, such as credentials from `sudo gh auth` or tokens in `/etc/environment`, so remove those before saving. Images are private to your hangar account.
+**Copy machine…** on a hangar remote makes either a clone or an image. It opens a
+chooser with the two side by side and a table of what each copies:
 
-Only a stopped machine can be saved. For a running machine the dialog offers **Stop machine and save**, which stops it exactly like **Stop…** (the machine is kept from reconnecting, its Herdr session is stopped, then the machine stops) and then saves the image; a suspended machine is resumed first and then stopped. The machine stays stopped afterwards; use **Start** to keep working on it. Machines created from an older template that cannot reset machine identity cannot be saved; the dialog says so, and you can create a new machine from the latest template, set it up, and save that one.
+|                     | Clone now   | Save as image  |
+| ------------------- | ----------- | -------------- |
+| Installed software  | ✓           | ✓              |
+| System settings     | ✓           | ✓              |
+| Repos & home files  | ✓           | ✗              |
+| Logins (gh, claude) | ✓           | ✗              |
+| Result              | new machine | reusable image |
 
-The **images** tab lists your images, newest first, with their creation date. Select one to see its description, creation date, the machine it was saved from, its template and size, and choose **New machine from image…**, which opens **Add remote** with the image chosen as **Source**, or **Delete image…**. With no images yet, the tab explains how to save one.
+Use ←/→ or click a column to choose, and **Enter** (or a second click) to continue
+to that choice's form. **Esc** in the form returns to the chooser, and **Esc** in
+the chooser returns to the remotes tab with the same remote and action selected.
+
+Both need a stopped machine. For a running machine the form offers **Stop machine
+and clone** or **Stop machine and save**, which stops it exactly like **Stop…**
+(the machine is kept from reconnecting, its Herdr session is stopped, then the
+machine stops) and then copies it; a suspended machine is resumed first and then
+stopped. The machine stays stopped afterwards; use **Start** to keep working on it.
+Machines created from an older template that cannot reset machine identity cannot
+be copied (**Template too old to copy**); the form says so, and you can create a
+new machine from the latest template, set it up, and copy that one.
+
+##### Clones
+
+**Clone now** makes a second machine exactly like this one: a copy of its root disk
+**and** its `/data` disk. Enter a name for the new machine (lowercase letters,
+digits and `-`; the default is `<machine>-clone`) and confirm. Everything on both
+disks is copied: installed software, system settings, repositories, your home
+directory (`/data/home`) and the logins kept there, such as gh, Claude, Codex and
+SSH keys, so treat a clone like the original. The clone gets its own SSH host keys,
+machine ID and hostname. Herdr waits until it is running and ready, then lists it on
+the remotes tab and starts its Herdr session, as **Create new machine** does.
+Clones count toward your hangar machine limit.
+
+##### Images
+
+**Save as image** keeps a starting point for new machines: the machine's root disk
+only. Enter a name (lowercase letters, digits and `-`) and an optional description,
+and confirm. Installed software and system settings are included, but files in your
+home directory (`/data/home`), logins kept there (gh, Claude, Codex, git, SSH) and
+repositories in `/data/workspace` are not. Anything written to the root disk is
+included, such as credentials from `sudo gh auth` or tokens in `/etc/environment`,
+so remove those before saving. Images are private to your hangar account.
+
+The **images** tab lists your images, newest first, with their creation date. Select one to see its description, creation date, the machine it was saved from, its template and size, and choose **New machine from image…**, which opens **Add remote** with the image chosen as **Source**, or **Delete image…**. With no images yet, the tab explains how to save one with **Copy machine… → Save as image**.
 
 You can also choose **+ Add remote → Create new machine** and pick an image under **Source**; the list shows each image's name, creation date and the machine it was saved from. The default source is the latest `herdr` template. A machine created from an image gets the image's root disk and a new, empty `/data`, so sign in to your tools again there. With an image selected as source, **Delete image…** deletes it after confirmation; machines already created from it are not affected.
-
-#### Forks
-
-A fork is a new machine with a full copy of a hangar machine: its root disk **and** its `/data` disk. Choose **Fork…** on a hangar remote, enter a name for the new machine (lowercase letters, digits and `-`; the default is `<machine>-fork`), and confirm. Everything on both disks is copied: repositories, your home directory (`/data/home`) and the logins kept there, such as gh, Claude, Codex and SSH keys, so treat a fork like the original. The fork gets its own SSH host keys, machine ID and hostname. Forks count toward your hangar machine limit.
-
-Only a stopped machine can be forked, with the same handling as **Save as image…**: for a running machine the dialog offers **Stop machine and fork**, which stops it exactly like **Stop…** and then forks it; a suspended machine is resumed first and then stopped; machines from an older template that cannot reset machine identity cannot be forked. Herdr waits until the fork is running and ready, then lists it and starts its Herdr session, as **Create new machine** does. The original machine stays stopped; use **Start** to keep working on it.
 
 ## Before you connect
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
 use crate::client::locations::hangar::{
-    MachineDetails, SaveCheck, SavePlan, SnapshotUse, FORK_CONTENTS, IMAGE_CONTENTS,
+    MachineDetails, SaveCheck, SavePlan, SnapshotUse, CLONE_CONTENTS, IMAGE_CONTENTS,
 };
 use crate::client::locations::{self as backend, LocationPreferences, RemoteOptions};
 use crate::hangar::api::MachineState;
@@ -22,82 +22,96 @@ pub(super) enum LocationDialogKind {
     Manage,
     Add(Box<add::AddRemoteForm>),
     Edit(Option<ProfileId>),
-    New,
     Stop,
     Suspend,
     Delete(Box<DeleteRequest>),
-    SaveImage(Box<SaveImageRequest>),
+    /// Copy machine…: Clone now or Save as image, then that choice's form.
+    Copy(Box<CopyRequest>),
     DeleteImage(Box<ImageDeleteRequest>),
     /// Confirms Sign out….
     SignOut,
-    Fork(Box<ForkRequest>),
 }
 
-/// Save as image… for a hangar remote. The machine check runs on a worker.
-#[derive(Clone, Debug)]
-pub(super) struct SaveImageRequest {
-    pub profile: SavedSshEndpoint,
-    pub options: RemoteOptions,
-    pub machine_name: String,
-    /// `None` while the machine is being checked.
-    pub check: Option<SaveCheck>,
-    /// The last failed attempt, kept visible while the machine is checked again.
-    pub error: Option<String>,
+/// The two ways Copy machine… copies a hangar machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum CopyChoice {
+    /// A second machine with both disks (hangar's fork).
+    #[default]
+    Clone,
+    /// The root disk as a reusable image.
+    Image,
 }
 
-impl SaveImageRequest {
-    pub fn plan(&self) -> Option<SavePlan> {
-        self.check.as_ref().and_then(|check| check.plan)
+impl CopyChoice {
+    pub const ALL: [Self; 2] = [Self::Clone, Self::Image];
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::Clone => Self::Image,
+            Self::Image => Self::Clone,
+        }
     }
 
-    /// What the dialog says: a failure, how the machine becomes saveable, and what an
-    /// image contains.
-    pub fn message(&self) -> String {
-        let status = match &self.check {
-            None => format!("Checking {}…", self.machine_name),
-            Some(check) => check.note.clone(),
-        };
-        [self.error.as_deref().unwrap_or(""), &status, IMAGE_CONTENTS]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    pub fn usage(self) -> SnapshotUse {
+        match self {
+            Self::Clone => SnapshotUse::Fork,
+            Self::Image => SnapshotUse::Image,
+        }
     }
 
-    pub fn primary_label(&self) -> &'static str {
-        match self.plan() {
-            Some(SavePlan::Stop | SavePlan::ResumeThenStop) => " ↵ stop machine and save ",
-            _ => " ↵ save ",
+    pub fn index(self) -> usize {
+        match self {
+            Self::Clone => 0,
+            Self::Image => 1,
         }
     }
 }
 
-/// Fork machine… for a hangar remote. The machine check runs on a worker, as for
-/// Save as image….
+/// Copy machine… for a hangar remote. The chooser comes first; once a choice is made,
+/// its form is shown and the machine check runs on a worker.
 #[derive(Clone, Debug)]
-pub(super) struct ForkRequest {
+pub(super) struct CopyRequest {
     pub profile: SavedSshEndpoint,
     pub options: RemoteOptions,
     pub machine_name: String,
+    pub choice: CopyChoice,
+    /// The form of `choice` is shown; otherwise the chooser.
+    pub chosen: bool,
     /// `None` while the machine is being checked.
     pub check: Option<SaveCheck>,
     /// The last failed attempt, kept visible while the machine is checked again.
     pub error: Option<String>,
 }
 
-impl ForkRequest {
+impl CopyRequest {
+    pub fn new(profile: SavedSshEndpoint, options: RemoteOptions, machine_name: String) -> Self {
+        Self {
+            profile,
+            options,
+            machine_name,
+            choice: CopyChoice::Clone,
+            chosen: false,
+            check: None,
+            error: None,
+        }
+    }
+
     pub fn plan(&self) -> Option<SavePlan> {
         self.check.as_ref().and_then(|check| check.plan)
     }
 
-    /// What the dialog says: a failure, how the machine becomes forkable, and what a
-    /// fork copies.
+    /// What the form says: a failure, how the machine becomes copyable, and what the
+    /// choice copies.
     pub fn message(&self) -> String {
         let status = match &self.check {
             None => format!("Checking {}…", self.machine_name),
             Some(check) => check.note.clone(),
         };
-        [self.error.as_deref().unwrap_or(""), &status, FORK_CONTENTS]
+        let contents = match self.choice {
+            CopyChoice::Clone => CLONE_CONTENTS,
+            CopyChoice::Image => IMAGE_CONTENTS,
+        };
+        [self.error.as_deref().unwrap_or(""), &status, contents]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -105,9 +119,12 @@ impl ForkRequest {
     }
 
     pub fn primary_label(&self) -> &'static str {
-        match self.plan() {
-            Some(SavePlan::Stop | SavePlan::ResumeThenStop) => " ↵ stop machine and fork ",
-            _ => " ↵ fork ",
+        let stops = matches!(self.plan(), Some(SavePlan::Stop | SavePlan::ResumeThenStop));
+        match (self.choice, stops) {
+            (CopyChoice::Clone, true) => " ↵ stop machine and clone ",
+            (CopyChoice::Clone, false) => " ↵ clone ",
+            (CopyChoice::Image, true) => " ↵ stop machine and save ",
+            (CopyChoice::Image, false) => " ↵ save ",
         }
     }
 }
@@ -134,7 +151,6 @@ pub(super) struct LocationDialog {
     pub fields: Vec<TextEditor>,
     pub selected: usize,
     pub location: usize,
-    pub location_missing: bool,
     pub profiles: Vec<SavedSshEndpoint>,
     pub prefs: LocationPreferences,
     pub message: String,
@@ -155,36 +171,48 @@ pub(super) struct LocationDialog {
 }
 
 impl LocationDialog {
-    pub fn title(&self) -> &str {
-        match self.kind {
-            LocationDialogKind::Manage => "remotes",
-            LocationDialogKind::Add(_) => "add remote",
-            LocationDialogKind::Edit(_) => "remote settings",
-            LocationDialogKind::New => "new workspace",
-            LocationDialogKind::Stop => "stop machine",
-            LocationDialogKind::Suspend => "suspend machine",
-            LocationDialogKind::Delete(_) => "delete machine",
-            LocationDialogKind::SaveImage(_) => "save as image",
-            LocationDialogKind::DeleteImage(_) => "delete image",
-            LocationDialogKind::SignOut => "sign out of hangar",
-            LocationDialogKind::Fork(_) => "fork machine",
+    pub fn title(&self) -> String {
+        match &self.kind {
+            LocationDialogKind::Manage => "remotes".into(),
+            LocationDialogKind::Add(_) => "add remote".into(),
+            LocationDialogKind::Edit(_) => "remote settings".into(),
+            LocationDialogKind::Stop => "stop machine".into(),
+            LocationDialogKind::Suspend => "suspend machine".into(),
+            LocationDialogKind::Delete(_) => "delete machine".into(),
+            LocationDialogKind::Copy(request) => match (request.chosen, request.choice) {
+                (false, _) => format!("copy {}", request.machine_name),
+                (true, CopyChoice::Clone) => format!("clone {}", request.machine_name),
+                (true, CopyChoice::Image) => format!("save {} as image", request.machine_name),
+            },
+            LocationDialogKind::DeleteImage(_) => "delete image".into(),
+            LocationDialogKind::SignOut => "sign out of hangar".into(),
         }
     }
     pub fn labels(&self) -> &[&str] {
-        match self.kind {
+        match &self.kind {
             LocationDialogKind::Add(_) => &["Provider", "Machine", "Name", "Source", ""],
             LocationDialogKind::Edit(_) => {
                 &["Name", "SSH target", "Herdr session", "Default directory"]
             }
-            LocationDialogKind::New => &["Name", "Location", "Directory"],
-            LocationDialogKind::SaveImage(_) => &["Image name", "Description"],
-            LocationDialogKind::Fork(_) => &["Name"],
+            LocationDialogKind::Copy(request) => match (request.chosen, request.choice) {
+                (false, _) => &[],
+                (true, CopyChoice::Clone) => &["Name"],
+                (true, CopyChoice::Image) => &["Image name", "Description"],
+            },
             LocationDialogKind::Manage
             | LocationDialogKind::Stop
             | LocationDialogKind::Suspend
             | LocationDialogKind::Delete(_)
             | LocationDialogKind::DeleteImage(_)
             | LocationDialogKind::SignOut => &[],
+        }
+    }
+
+    /// The Copy machine… chooser is shown.
+    pub fn copy_chooser(&self) -> Option<&CopyRequest> {
+        match &self.kind {
+            LocationDialogKind::Copy(request) if !request.chosen => Some(request),
+            _ => None,
         }
     }
     /// The selected remote's hangar machine state, when known.
@@ -205,13 +233,7 @@ impl LocationDialog {
     }
 
     /// Takes a freshly loaded list, keeping the selected remote while it is listed.
-    fn apply_snapshot(&mut self, mut snapshot: RemotesSnapshot) {
-        if matches!(self.kind, LocationDialogKind::New) {
-            let hidden = snapshot.hidden.clone();
-            snapshot
-                .profiles
-                .retain(|profile| !hidden.contains(&profile.id));
-        }
+    fn apply_snapshot(&mut self, snapshot: RemotesSnapshot) {
         self.prefs = snapshot.prefs;
         if let Some(details) = snapshot.details {
             self.view.details.extend(details);
@@ -224,19 +246,12 @@ impl LocationDialog {
 
     fn replace_profiles(&mut self, profiles: Vec<SavedSshEndpoint>) {
         let selected = self.profile().map(|p| p.id.clone());
-        self.location_missing = selected
-            .as_ref()
-            .is_some_and(|id| !profiles.iter().any(|p| &p.id == id))
-            && matches!(self.kind, LocationDialogKind::New);
         self.location = selected
             .and_then(|id| profiles.iter().position(|p| p.id == id))
             .map_or(0, |i| i + 1);
         self.profiles = profiles;
     }
     pub fn location_label(&self) -> String {
-        if self.location_missing {
-            return "removed — choose a location".into();
-        }
         self.profile()
             .map(|p| {
                 let mut label = p.label.clone();
@@ -264,25 +279,8 @@ impl LocationDialog {
             })
             .unwrap_or_else(|| "Local".into())
     }
-    pub fn choice_field(&self, index: usize) -> bool {
-        matches!(self.kind, LocationDialogKind::New) && index == 1
-    }
-    pub fn cycle_location(&mut self, delta: isize) {
-        self.location_missing = false;
-        self.location =
-            (self.location as isize + delta).rem_euclid(self.profiles.len() as isize + 1) as usize;
-        if matches!(self.kind, LocationDialogKind::New) {
-            let cwd = self
-                .profile()
-                .and_then(|p| self.prefs.remotes.get(&p.id))
-                .map(|o| o.cwd.as_str())
-                .unwrap_or("");
-            self.fields[2] = TextEditor::new(cwd, true);
-        }
-    }
     pub fn editor_mut(&mut self) -> Option<&mut TextEditor> {
         if self.busy
-            || self.choice_field(self.selected)
             || matches!(
                 self.kind,
                 LocationDialogKind::Manage
@@ -310,13 +308,6 @@ impl LocationDialog {
 #[derive(Debug)]
 enum JobResult {
     Message(String),
-    Ready(NewLocationWorkspace),
-    Created {
-        endpoint: ClientEndpointId,
-        workspace: String,
-        profile: Option<SavedSshEndpoint>,
-        stamp: LocationStamp,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -325,30 +316,48 @@ struct LocationStamp {
     boot_id: String,
 }
 
-#[derive(Debug)]
-struct NewLocationWorkspace {
-    profile: Option<SavedSshEndpoint>,
-    options: RemoteOptions,
-    cwd: String,
-    label: String,
+/// Where New workspace creates a workspace: the default machine (Settings → remotes →
+/// Use as default; Local when none) with its default directory.
+#[derive(Clone, Debug)]
+pub(super) struct WorkspaceDestination {
+    /// `None` is Local.
+    pub profile: Option<SavedSshEndpoint>,
+    pub options: RemoteOptions,
 }
 
-impl NewLocationWorkspace {
-    fn endpoint(&self) -> ClientEndpointId {
+impl WorkspaceDestination {
+    pub fn local() -> Self {
+        Self {
+            profile: None,
+            options: RemoteOptions::default(),
+        }
+    }
+
+    pub fn endpoint(&self) -> ClientEndpointId {
         self.profile
             .as_ref()
             .map(|p| ClientEndpointId::Ssh(p.id.clone()))
             .unwrap_or(ClientEndpointId::Local)
     }
+
+    /// The machine's default directory; `None` lets its server choose.
+    pub fn cwd(&self) -> Option<String> {
+        let cwd = self.options.cwd.trim();
+        (!cwd.is_empty()).then(|| cwd.to_owned())
+    }
 }
 
+/// A workspace created on a machine other than the displayed one, focused once that
+/// machine's snapshot lists it.
 #[derive(Debug)]
 struct CreatedLocationWorkspace {
-    epoch: u64,
     endpoint: ClientEndpointId,
     workspace: String,
     profile: Option<SavedSshEndpoint>,
     stamp: LocationStamp,
+    /// The machine displayed when New workspace was chosen; focus is not taken once
+    /// another one is shown.
+    origin: ClientEndpointId,
     deadline: Instant,
 }
 
@@ -358,30 +367,37 @@ pub(super) struct LocationController {
     account: account::AccountController,
     epoch: u64,
     job: Option<(u64, mpsc::Receiver<Result<JobResult, String>>)>,
-    prepared: Option<(u64, NewLocationWorkspace, Instant)>,
+    /// New workspace on another machine: the create request, then the focus wait.
+    create: Option<mpsc::Receiver<Result<CreatedLocationWorkspace, String>>>,
     created: Option<CreatedLocationWorkspace>,
     /// A hangar sync for the remotes dialog, then the reloaded list.
     sync: Option<(u64, mpsc::Receiver<Result<RemotesSnapshot, String>>)>,
     /// When the remotes dialog last asked for a sync.
     last_sync: Option<Instant>,
-    image_check: Option<(u64, mpsc::Receiver<Result<SaveCheck, String>>)>,
+    /// The machine check of Copy machine…, for the choice it was made for.
+    image_check: Option<(u64, SnapshotUse, SaveCheckJob)>,
     /// The images listing and usage read for Settings → Remotes.
     images: Option<(u64, mpsc::Receiver<Result<view::ImageList, String>>)>,
     usage: Option<(
         u64,
         mpsc::Receiver<Result<crate::hangar::api::Usage, String>>,
     )>,
-    /// Replaces the hangar request behind Save as image's and Fork machine's check in
-    /// tests.
+    /// Replaces the hangar request behind Copy machine's check in tests.
     save_checker: Option<SaveChecker>,
     /// Replaces the on-disk check that the selected remote is unchanged in tests.
     binding_validator: Option<BindingValidator>,
+    /// Replaces reading the remotes (and the default machine) from disk in tests.
+    remotes_loader: Option<RemotesLoader>,
 }
 
 type BindingValidator =
     fn(&SavedSshEndpoint, Option<&crate::client::locations::CloudBinding>) -> Result<(), String>;
 
 type SaveChecker = fn(&HangarBinding) -> Result<SaveCheck, crate::hangar::api::HangarError>;
+
+type SaveCheckJob = mpsc::Receiver<Result<SaveCheck, String>>;
+
+type RemotesLoader = fn() -> Result<RemotesSnapshot, String>;
 
 /// The remotes as the dialog shows them, loaded from disk off the render path.
 #[derive(Debug)]
@@ -425,6 +441,29 @@ fn sync_and_load() -> Result<RemotesSnapshot, String> {
 #[cfg(test)]
 fn sync_and_load() -> Result<RemotesSnapshot, String> {
     Err("hangar sync is disabled in unit tests".into())
+}
+
+/// Asks the destination's server for a workspace in its default directory.
+#[cfg(not(test))]
+fn create_remote_workspace(
+    destination: &WorkspaceDestination,
+    label: String,
+) -> Result<String, String> {
+    backend::create_workspace(
+        destination.profile.as_ref(),
+        &destination.options,
+        destination.options.cwd.clone(),
+        label,
+    )
+}
+
+/// Unit tests never reach another machine's server.
+#[cfg(test)]
+fn create_remote_workspace(
+    _destination: &WorkspaceDestination,
+    _label: String,
+) -> Result<String, String> {
+    Err("workspace creation on another machine is disabled in unit tests".into())
 }
 
 impl RemotesSnapshot {
@@ -479,21 +518,13 @@ impl RemotesSnapshot {
 
 impl ClientShellState {
     fn location_dialog(&mut self, kind: LocationDialogKind) -> Result<LocationDialog, String> {
-        let mut snapshot = RemotesSnapshot::load()?;
-        if matches!(kind, LocationDialogKind::New) {
-            // A hidden machine is not connected, so it cannot host a new workspace.
-            let hidden = snapshot.hidden.clone();
-            snapshot
-                .profiles
-                .retain(|profile| !hidden.contains(&profile.id));
-        }
+        let snapshot = RemotesSnapshot::load()?;
         let location = snapshot.prefs.default_index(&snapshot.profiles);
         Ok(LocationDialog {
             kind,
             fields: Vec::new(),
             selected: 0,
             location,
-            location_missing: false,
             profiles: snapshot.profiles,
             prefs: snapshot.prefs,
             message: String::new(),
@@ -510,9 +541,7 @@ impl ClientShellState {
     /// remote (none when opened afresh).
     fn remotes_dialog(&mut self, kind: LocationDialogKind) -> Result<LocationDialog, String> {
         let carried = match self.overlay.as_ref() {
-            Some(ClientShellOverlay::Locations(dialog))
-                if !matches!(dialog.kind, LocationDialogKind::New) =>
-            {
+            Some(ClientShellOverlay::Locations(dialog)) => {
                 Some((dialog.view.clone(), dialog.profile().map(|p| p.id.clone())))
             }
             _ => None,
@@ -528,12 +557,28 @@ impl ClientShellState {
     }
 
     /// Closes a form or confirmation opened from Settings → Remotes and shows the view
-    /// as it was; elsewhere (New workspace) closes the dialog.
+    /// as it was; on the view itself closes the dialog. A Copy machine… form goes back
+    /// to its chooser first.
     pub(super) fn escape_location(&mut self) {
+        if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
+            if let LocationDialogKind::Copy(request) = &mut dialog.kind {
+                if request.chosen && !dialog.busy {
+                    request.chosen = false;
+                    request.check = None;
+                    request.error = None;
+                    dialog.fields.clear();
+                    dialog.selected = 0;
+                    dialog.message.clear();
+                    // A check still running for the form is no longer wanted.
+                    self.locations.image_check = None;
+                    return;
+                }
+            }
+        }
         let returns = matches!(
             self.overlay,
             Some(ClientShellOverlay::Locations(ref dialog))
-                if !matches!(dialog.kind, LocationDialogKind::Manage | LocationDialogKind::New)
+                if !matches!(dialog.kind, LocationDialogKind::Manage)
         );
         if !returns {
             self.close_location();
@@ -608,27 +653,6 @@ impl ClientShellState {
         std::thread::spawn(move || {
             let _ = send.send(sync_and_load());
         });
-    }
-
-    pub(super) fn open_location_workspace(&mut self) {
-        if self.locations.job.is_some() {
-            self.set_endpoint_error("A remote operation is still running");
-            return;
-        }
-        self.locations.epoch = self.locations.epoch.wrapping_add(1);
-        match self.location_dialog(LocationDialogKind::New) {
-            Ok(mut dialog) => {
-                dialog.fields = vec![
-                    TextEditor::new("", false),
-                    TextEditor::default(),
-                    TextEditor::default(),
-                ];
-                dialog.cycle_location(0);
-                dialog.message = "All tabs and panes in this workspace run at this location. Empty directory uses its server default.".into();
-                self.overlay = Some(ClientShellOverlay::Locations(dialog));
-            }
-            Err(error) => self.set_endpoint_error(error),
-        }
     }
 
     fn location_job(&mut self, job: impl FnOnce() -> Result<JobResult, String> + Send + 'static) {
@@ -787,13 +811,6 @@ impl ClientShellState {
         if dialog.busy {
             return;
         }
-        if dialog.location_missing {
-            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                dialog.message = "The selected remote was removed. Choose a location explicitly before creating.".into();
-            }
-            outcome.repaint = true;
-            return;
-        }
         outcome.repaint = true;
         let profile = dialog.profile().cloned();
         let options = profile
@@ -804,32 +821,6 @@ impl ClientShellState {
         let result = match &dialog.kind {
             LocationDialogKind::Add(_) => Ok(()),
             LocationDialogKind::Edit(_) => self.save_location(),
-            LocationDialogKind::New => {
-                let cwd = dialog.fields[2].trim().to_owned();
-                let label = dialog.fields[0].trim().to_owned();
-                let ready = profile.as_ref().is_none_or(|p| {
-                    p.enabled && self.endpoint_is_online(&ClientEndpointId::Ssh(p.id.clone()))
-                });
-                let intent = NewLocationWorkspace {
-                    profile,
-                    options,
-                    cwd,
-                    label,
-                };
-                if ready {
-                    self.submit_location_workspace(intent);
-                } else {
-                    self.location_job(move || {
-                        // New workspace never starts a hangar machine; a stopped one
-                        // reports "use Start remote".
-                        if let Some(p) = &intent.profile {
-                            backend::start_session(p, &intent.options)?;
-                        }
-                        Ok(JobResult::Ready(intent))
-                    });
-                }
-                Ok(())
-            }
             LocationDialogKind::Stop => {
                 if let Some(profile) = profile {
                     self.location_job(move || {
@@ -846,18 +837,20 @@ impl ClientShellState {
                 }
                 Ok(())
             }
-            LocationDialogKind::SaveImage(request) => {
+            LocationDialogKind::Copy(request) => {
                 let request = (**request).clone();
-                self.submit_save_image(request);
+                if !request.chosen {
+                    self.choose_copy();
+                } else {
+                    match request.choice {
+                        CopyChoice::Clone => self.submit_clone(request),
+                        CopyChoice::Image => self.submit_save_image(request),
+                    }
+                }
                 Ok(())
             }
             LocationDialogKind::SignOut => {
                 self.location_job(|| backend::hangar::sign_out().map(JobResult::Message));
-                Ok(())
-            }
-            LocationDialogKind::Fork(request) => {
-                let request = (**request).clone();
-                self.submit_fork(request);
                 Ok(())
             }
             LocationDialogKind::DeleteImage(request) => {
@@ -949,33 +942,12 @@ impl ClientShellState {
                     dialog.message = format!("Stop hangar machine {name}? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend… keeps them). It does not reconnect until it is started again.");
                 }
             }
-            RemoteAction::SaveImage => {
+            RemoteAction::Copy => {
                 let Some(cloud) = options.cloud.as_ref() else {
-                    return Err("Save as image requires a hangar machine.".into());
+                    return Err("Copy machine requires a hangar machine.".into());
                 };
                 let machine_name = cloud.hangar().machine_name.clone();
-                self.show_save_image(SaveImageRequest {
-                    machine_name,
-                    profile,
-                    options,
-                    check: None,
-                    error: None,
-                });
-                self.check_save_image();
-            }
-            RemoteAction::Fork => {
-                let Some(cloud) = options.cloud.as_ref() else {
-                    return Err("Fork machine requires a hangar machine.".into());
-                };
-                let machine_name = cloud.hangar().machine_name.clone();
-                self.show_fork(ForkRequest {
-                    machine_name,
-                    profile,
-                    options,
-                    check: None,
-                    error: None,
-                });
-                self.check_save_image();
+                self.show_copy(CopyRequest::new(profile, options, machine_name));
             }
             RemoteAction::Remove => match options.cloud.clone() {
                 Some(cloud) => self.confirm_delete(DeleteRequest {
@@ -1012,56 +984,81 @@ impl ClientShellState {
         Ok(())
     }
 
-    /// Switches the dialog to Save as image… with empty name and description.
-    fn show_save_image(&mut self, request: SaveImageRequest) {
+    /// Switches the dialog to the Copy machine… chooser.
+    fn show_copy(&mut self, request: CopyRequest) {
         if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-            dialog.message = request.message();
-            dialog.kind = LocationDialogKind::SaveImage(Box::new(request));
-            dialog.fields = vec![TextEditor::new("", false), TextEditor::new("", false)];
+            dialog.message.clear();
+            dialog.kind = LocationDialogKind::Copy(Box::new(request));
+            dialog.fields.clear();
             dialog.selected = 0;
         }
     }
 
-    /// Switches the dialog to Fork machine… with the suggested `<source>-fork` name.
-    fn show_fork(&mut self, request: ForkRequest) {
+    /// The chooser's other choice.
+    pub(super) fn switch_copy_choice(&mut self, choice: CopyChoice) {
         if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-            let name = backend::hangar::default_fork_name(&request.machine_name);
-            dialog.message = request.message();
-            dialog.kind = LocationDialogKind::Fork(Box::new(request));
-            dialog.fields = vec![TextEditor::new(&name, false)];
-            dialog.selected = 0;
+            if let LocationDialogKind::Copy(request) = &mut dialog.kind {
+                if !request.chosen {
+                    request.choice = choice;
+                }
+            }
         }
     }
 
-    /// Reads the machine's state and template on a worker for Save as image… or Fork
-    /// machine…; the result decides whether the dialog proceeds directly, stops first,
-    /// or explains why it cannot proceed.
-    fn check_save_image(&mut self) {
-        let (options, usage) = match self.overlay.as_ref() {
-            Some(ClientShellOverlay::Locations(LocationDialog {
-                kind: LocationDialogKind::SaveImage(request),
-                ..
-            })) => (&request.options, SnapshotUse::Image),
-            Some(ClientShellOverlay::Locations(LocationDialog {
-                kind: LocationDialogKind::Fork(request),
-                ..
-            })) => (&request.options, SnapshotUse::Fork),
-            _ => return,
-        };
-        let Some(cloud) = options.cloud.clone() else {
+    /// Continues from the chooser to the chosen form (clone: the suggested
+    /// `<source>-clone` name; image: empty name and description) and checks the
+    /// machine.
+    fn choose_copy(&mut self) {
+        let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
             return;
         };
-        let (checker, dialog): (SaveChecker, _) = match usage {
-            SnapshotUse::Image => (backend::hangar::check_save, "Save as image…"),
-            SnapshotUse::Fork => (backend::hangar::check_fork, "Fork machine…"),
+        let LocationDialogKind::Copy(request) = &mut dialog.kind else {
+            return;
+        };
+        request.chosen = true;
+        request.check = None;
+        request.error = None;
+        dialog.fields = match request.choice {
+            CopyChoice::Clone => vec![TextEditor::new(
+                &backend::hangar::default_clone_name(&request.machine_name),
+                false,
+            )],
+            CopyChoice::Image => vec![TextEditor::new("", false), TextEditor::new("", false)],
+        };
+        dialog.message = request.message();
+        dialog.selected = 0;
+        self.check_save_image();
+    }
+
+    /// Reads the machine's state and template on a worker for the chosen Copy machine…
+    /// form; the result decides whether the form proceeds directly, stops first, or
+    /// explains why it cannot proceed.
+    fn check_save_image(&mut self) {
+        let Some(ClientShellOverlay::Locations(LocationDialog {
+            kind: LocationDialogKind::Copy(request),
+            ..
+        })) = self.overlay.as_ref()
+        else {
+            return;
+        };
+        if !request.chosen {
+            return;
+        }
+        let Some(cloud) = request.options.cloud.clone() else {
+            return;
+        };
+        let usage = request.choice.usage();
+        let checker: SaveChecker = match usage {
+            SnapshotUse::Image => backend::hangar::check_save,
+            SnapshotUse::Fork => backend::hangar::check_fork,
         };
         let checker = self.locations.save_checker.unwrap_or(checker);
         let (send, receive) = mpsc::channel();
-        self.locations.image_check = Some((self.locations.epoch, receive));
+        self.locations.image_check = Some((self.locations.epoch, usage, receive));
         std::thread::spawn(move || {
             let result = checker(cloud.hangar()).map_err(|error| {
                 format!(
-                    "Could not check {}: {error} Close and reopen {dialog} to retry.",
+                    "Could not check {}: {error} Close and reopen Copy machine… to retry.",
                     cloud.hangar().machine_name
                 )
             });
@@ -1069,7 +1066,7 @@ impl ClientShellState {
         });
     }
 
-    fn submit_save_image(&mut self, request: SaveImageRequest) {
+    fn submit_save_image(&mut self, request: CopyRequest) {
         let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
             return;
         };
@@ -1099,7 +1096,7 @@ impl ClientShellState {
             } else {
                 0
             };
-            dialog.message = SaveImageRequest {
+            dialog.message = CopyRequest {
                 error: Some(error),
                 ..request
             }
@@ -1118,7 +1115,7 @@ impl ClientShellState {
         });
     }
 
-    fn submit_fork(&mut self, request: ForkRequest) {
+    fn submit_clone(&mut self, request: CopyRequest) {
         let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() else {
             return;
         };
@@ -1128,12 +1125,12 @@ impl ClientShellState {
             .map(|field| field.trim().to_owned())
             .unwrap_or_default();
         let Some(plan) = request.plan() else {
-            // Still checking, or the machine cannot be forked; the message says which.
+            // Still checking, or the machine cannot be cloned; the message says which.
             return;
         };
         if let Err(error) = backend::hangar::validate_fork_name(&name) {
             dialog.selected = 0;
-            dialog.message = ForkRequest {
+            dialog.message = CopyRequest {
                 error: Some(error),
                 ..request
             }
@@ -1172,8 +1169,6 @@ impl ClientShellState {
         self.locations.epoch = self.locations.epoch.wrapping_add(1);
         self.locations.add.cancel_sign_in();
         self.locations.account.cancel_sign_in();
-        self.locations.created = None;
-        self.locations.prepared = None;
         self.overlay = None;
     }
 
@@ -1196,6 +1191,21 @@ impl ClientShellState {
         if dialog.busy {
             return true;
         }
+        if let Some(request) = dialog.copy_chooser() {
+            // The chooser: ←/→ (h/l, tab) switch, ↵ continues.
+            let choice = request.choice;
+            match key.code {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => self.switch_copy_choice(choice.other()),
+                KeyCode::Enter | KeyCode::Char(' ') => self.accept_location(outcome),
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Tab | KeyCode::Down => {
                 dialog.selected = (dialog.selected + 1) % (dialog.labels().len() + 1)
@@ -1203,9 +1213,6 @@ impl ClientShellState {
             KeyCode::BackTab | KeyCode::Up => {
                 dialog.selected =
                     (dialog.selected + dialog.labels().len()) % (dialog.labels().len() + 1)
-            }
-            KeyCode::Left | KeyCode::Right if dialog.choice_field(dialog.selected) => {
-                dialog.cycle_location(if key.code == KeyCode::Left { -1 } else { 1 })
             }
             KeyCode::Enter => self.accept_location(outcome),
             _ => {
@@ -1228,37 +1235,197 @@ impl ClientShellState {
         })
     }
 
-    fn submit_location_workspace(&mut self, intent: NewLocationWorkspace) {
-        let endpoint = intent.endpoint();
-        let Some(stamp) = self.location_stamp(&endpoint) else {
-            self.locations.prepared = Some((
-                self.locations.epoch,
-                intent,
-                Instant::now() + Duration::from_secs(30),
-            ));
-            if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                dialog.busy = true;
-                dialog.message = "Waiting for the destination session to connect…".into();
+    /// New workspace, from the keybinding, the sidebar and the mobile menu: on the
+    /// default machine with its default directory, after the name prompt when
+    /// `prompt_new_workspace_name` is set. A default machine that is not connected is
+    /// never started; a notice says so and nothing is created.
+    pub(super) fn new_workspace(&mut self, outcome: &mut ClientShellInput) {
+        outcome.repaint = true;
+        if self.locations.create.is_some() {
+            self.set_endpoint_error("A new workspace is still being created");
+            return;
+        }
+        let load = self
+            .locations
+            .remotes_loader
+            .unwrap_or(RemotesSnapshot::load);
+        let destination = match load() {
+            Ok(snapshot) => self.new_workspace_destination(snapshot),
+            Err(error) => {
+                // Remote settings that cannot be read never block a local workspace.
+                tracing::warn!(%error, "remote settings are unavailable; new workspace uses Local");
+                Ok(WorkspaceDestination::local())
             }
+        };
+        match destination {
+            Err(notice) => self.set_endpoint_error(notice),
+            Ok(destination) if self.config.prompt_new_workspace_name => {
+                self.open_new_workspace_overlay(destination)
+            }
+            Ok(destination) => self.create_workspace_at(destination, None, outcome),
+        }
+    }
+
+    /// The default machine when it can host a new workspace now; otherwise the notice
+    /// to show.
+    fn new_workspace_destination(
+        &self,
+        snapshot: RemotesSnapshot,
+    ) -> Result<WorkspaceDestination, String> {
+        let index = snapshot.prefs.default_index(&snapshot.profiles);
+        let Some(profile) = index
+            .checked_sub(1)
+            .and_then(|index| snapshot.profiles.get(index))
+            .cloned()
+        else {
+            return Ok(WorkspaceDestination::local());
+        };
+        let options = snapshot
+            .prefs
+            .remotes
+            .get(&profile.id)
+            .cloned()
+            .unwrap_or_default();
+        let endpoint = ClientEndpointId::Ssh(profile.id.clone());
+        if profile.enabled && self.endpoint_is_online(&endpoint) {
+            return Ok(WorkspaceDestination {
+                profile: Some(profile),
+                options,
+            });
+        }
+        let label = &profile.label;
+        Err(if snapshot.hidden.contains(&profile.id) {
+            format!("Default machine {label} is hidden from the sidebar — show it in Settings → remotes, or choose another default.")
+        } else {
+            format!("Default machine {label} isn't connected — start it in Settings → remotes, or choose another default.")
+        })
+    }
+
+    /// Creates a workspace on `destination`. On the displayed machine this is the
+    /// usual request (next to the current workspace); on another machine its server is
+    /// asked directly and the workspace is focused once that machine lists it.
+    pub(super) fn create_workspace_at(
+        &mut self,
+        destination: WorkspaceDestination,
+        label: Option<String>,
+        outcome: &mut ClientShellInput,
+    ) {
+        let endpoint = destination.endpoint();
+        if endpoint == self.active_endpoint_id {
+            self.push_endpoint_method(
+                crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: self.workspace_action_id(),
+                        cwd: destination.cwd(),
+                        focus: true,
+                        label,
+                        env: Default::default(),
+                    },
+                ),
+                outcome,
+            );
+            return;
+        }
+        let name = self.endpoint_label(&endpoint).to_owned();
+        let Some(stamp) = self.location_stamp(&endpoint) else {
+            self.set_endpoint_error(format!("{name} isn't connected; no workspace was created."));
             return;
         };
-        self.location_job(move || {
-            let workspace = backend::create_workspace(
-                intent.profile.as_ref(),
-                &intent.options,
-                intent.cwd,
-                intent.label,
-            )?;
-            Ok(JobResult::Created {
-                endpoint,
-                workspace,
-                profile: intent.profile,
-                stamp,
-            })
+        let origin = self.active_endpoint_id.clone();
+        let (send, receive) = mpsc::channel();
+        self.locations.create = Some(receive);
+        std::thread::spawn(move || {
+            let result =
+                create_remote_workspace(&destination, label.unwrap_or_default()).map(|workspace| {
+                    CreatedLocationWorkspace {
+                        endpoint,
+                        workspace,
+                        profile: destination.profile,
+                        stamp,
+                        origin,
+                        deadline: Instant::now() + Duration::from_secs(20),
+                    }
+                });
+            let _ = send.send(result);
         });
+        self.set_endpoint_error(format!("Creating a workspace on {name}…"));
+    }
+
+    /// The request of New workspace on another machine, then focus once that machine's
+    /// snapshot lists the workspace. Focus is not taken once the user moved on: another
+    /// machine shown, a dialog opened, or the machine's server restarted.
+    fn tick_created_workspace(&mut self, outcome: &mut ClientShellInput) {
+        let received =
+            self.locations
+                .create
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Workspace creation stopped unexpectedly".into()))
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                });
+        if let Some(result) = received {
+            self.locations.create = None;
+            match result {
+                Ok(created) => self.locations.created = Some(created),
+                Err(error) => self.set_endpoint_error(error),
+            }
+            outcome.repaint = true;
+        }
+        let Some(created) = self.locations.created.as_ref() else {
+            return;
+        };
+        let stamp = self.location_stamp(&created.endpoint);
+        let stale = stamp.as_ref().is_some_and(|stamp| stamp != &created.stamp);
+        let visible = stamp.as_ref() == Some(&created.stamp)
+            && self
+                .endpoints
+                .iter()
+                .find(|e| e.endpoint_id == created.endpoint)
+                .and_then(|e| e.snapshot.as_deref())
+                .is_some_and(|s| {
+                    s.workspaces
+                        .iter()
+                        .any(|w| w.workspace_id == created.workspace)
+                });
+        let moved_on = self.overlay.is_some() || self.active_endpoint_id != created.origin;
+        if moved_on || stale || Instant::now() > created.deadline {
+            let name = self.endpoint_label(&created.endpoint).to_owned();
+            self.locations.created = None;
+            self.set_endpoint_error(format!(
+                "Workspace created on {name}; select it in the sidebar."
+            ));
+            outcome.repaint = true;
+        } else if visible {
+            let unchanged = created.profile.as_ref().is_none_or(|profile| {
+                backend::effective_profiles().is_ok_and(|profiles| {
+                    profiles
+                        .iter()
+                        .any(|p| backend::same_destination(p, profile) && p.enabled)
+                })
+            });
+            let endpoint = created.endpoint.clone();
+            let workspace = created.workspace.clone();
+            self.locations.created = None;
+            if unchanged {
+                self.focus_or_activate(
+                    endpoint,
+                    ClientEndpointFocusTarget::Workspace(workspace),
+                    outcome,
+                );
+            } else {
+                self.set_endpoint_error(
+                    "Workspace created, but the remote profile changed. Select it in the sidebar.",
+                );
+            }
+            outcome.repaint = true;
+        }
     }
 
     pub(crate) fn tick_locations(&mut self, outcome: &mut ClientShellInput) {
+        self.tick_created_workspace(outcome);
         self.tick_add_remote(outcome);
         self.tick_account(outcome);
         self.tick_remotes_view(outcome);
@@ -1314,33 +1481,28 @@ impl ClientShellState {
             .locations
             .image_check
             .as_ref()
-            .and_then(|(epoch, receiver)| match receiver.try_recv() {
-                Ok(result) => Some((*epoch, result)),
+            .and_then(|(epoch, usage, receiver)| match receiver.try_recv() {
+                Ok(result) => Some((*epoch, *usage, result)),
                 Err(mpsc::TryRecvError::Disconnected) => Some((
                     *epoch,
+                    *usage,
                     Err("The machine check stopped unexpectedly.".into()),
                 )),
                 Err(mpsc::TryRecvError::Empty) => None,
             });
-        if let Some((epoch, result)) = checked {
+        if let Some((epoch, usage, result)) = checked {
             self.locations.image_check = None;
             if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                if epoch == self.locations.epoch {
-                    let check = Some(result.unwrap_or_else(|note| SaveCheck { plan: None, note }));
-                    let message = match &mut dialog.kind {
-                        LocationDialogKind::SaveImage(request) => {
-                            request.check = check;
-                            Some(request.message())
-                        }
-                        LocationDialogKind::Fork(request) => {
-                            request.check = check;
-                            Some(request.message())
-                        }
-                        _ => None,
-                    };
-                    if let Some(message) = message {
+                if let LocationDialogKind::Copy(request) = &mut dialog.kind {
+                    // Only for the form it was made for.
+                    if epoch == self.locations.epoch
+                        && request.chosen
+                        && request.choice.usage() == usage
+                    {
+                        request.check =
+                            Some(result.unwrap_or_else(|note| SaveCheck { plan: None, note }));
                         if !dialog.busy {
-                            dialog.message = message;
+                            dialog.message = request.message();
                         }
                         outcome.repaint = true;
                     }
@@ -1369,63 +1531,20 @@ impl ClientShellState {
                 && matches!(self.overlay, Some(ClientShellOverlay::Locations(_)));
             let message = match result {
                 Ok(JobResult::Message(message)) => message,
-                Ok(JobResult::Ready(intent)) => {
-                    if current {
-                        self.locations.prepared =
-                            Some((epoch, intent, Instant::now() + Duration::from_secs(30)));
-                    }
-                    "Remote started. Waiting for its session snapshot…".into()
-                }
-                Ok(JobResult::Created {
-                    endpoint,
-                    workspace,
-                    profile,
-                    stamp,
-                }) => {
-                    if current {
-                        self.locations.created = Some(CreatedLocationWorkspace {
-                            epoch,
-                            endpoint,
-                            workspace: workspace.clone(),
-                            profile,
-                            stamp,
-                            deadline: Instant::now() + Duration::from_secs(20),
-                        });
-                        format!("Workspace {workspace} created. Waiting for its machine snapshot…")
-                    } else {
-                        format!("Workspace {workspace} created on its selected machine.")
-                    }
-                }
                 Err(error) => error,
             };
             if current {
                 if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                    dialog.busy =
-                        self.locations.created.is_some() || self.locations.prepared.is_some();
+                    dialog.busy = false;
                     dialog.message = message.clone();
-                    let saved = succeeded
-                        && matches!(
-                            dialog.kind,
-                            LocationDialogKind::SaveImage(_) | LocationDialogKind::Fork(_)
-                        );
+                    let saved = succeeded && matches!(dialog.kind, LocationDialogKind::Copy(_));
                     if !succeeded {
                         // The attempt may have stopped the machine: check it again and
                         // keep the error visible meanwhile.
-                        let retry = match &mut dialog.kind {
-                            LocationDialogKind::SaveImage(request) => {
-                                request.error = Some(message.clone());
-                                request.check = None;
-                                Some(request.message())
-                            }
-                            LocationDialogKind::Fork(request) => {
-                                request.error = Some(message.clone());
-                                request.check = None;
-                                Some(request.message())
-                            }
-                            _ => None,
-                        };
-                        if let Some(retry) = retry {
-                            dialog.message = retry;
+                        if let LocationDialogKind::Copy(request) = &mut dialog.kind {
+                            request.error = Some(message.clone());
+                            request.check = None;
+                            dialog.message = request.message();
                             recheck_image = true;
                         }
                     }
@@ -1448,8 +1567,8 @@ impl ClientShellState {
                                 | LocationDialogKind::SignOut
                         )
                     {
-                        // A finished confirmation, save or fork never stays armed for a
-                        // second Enter: the view is shown again as it was.
+                        // A finished confirmation or copy never stays armed for a second
+                        // Enter: the view is shown again as it was.
                         dialog.kind = LocationDialogKind::Manage;
                         dialog.fields.clear();
                         dialog.selected = 0;
@@ -1479,79 +1598,6 @@ impl ClientShellState {
             self.locations.images = None;
             self.request_images();
         }
-        let owns_new_dialog = matches!(
-            self.overlay,
-            Some(ClientShellOverlay::Locations(LocationDialog {
-                kind: LocationDialogKind::New,
-                ..
-            }))
-        );
-        if let Some((epoch, intent, deadline)) = self.locations.prepared.take() {
-            if epoch != self.locations.epoch || !owns_new_dialog || Instant::now() > deadline {
-                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                    dialog.busy = false;
-                    dialog.message =
-                        "Remote connection was cancelled or timed out; no workspace was created."
-                            .into();
-                }
-                outcome.repaint = true;
-            } else if self.location_stamp(&intent.endpoint()).is_some() {
-                self.submit_location_workspace(intent);
-                outcome.repaint = true;
-            } else {
-                self.locations.prepared = Some((epoch, intent, deadline));
-            }
-        }
-        if let Some(created) = self.locations.created.as_ref() {
-            let stamp = self.location_stamp(&created.endpoint);
-            let stale = stamp.as_ref().is_some_and(|stamp| stamp != &created.stamp);
-            let visible = stamp.as_ref() == Some(&created.stamp)
-                && self
-                    .endpoints
-                    .iter()
-                    .find(|e| e.endpoint_id == created.endpoint)
-                    .and_then(|e| e.snapshot.as_deref())
-                    .is_some_and(|s| {
-                        s.workspaces
-                            .iter()
-                            .any(|w| w.workspace_id == created.workspace)
-                    });
-            if created.epoch != self.locations.epoch
-                || !owns_new_dialog
-                || stale
-                || Instant::now() > created.deadline
-            {
-                self.locations.created = None;
-                if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                    dialog.busy = false;
-                    dialog.message = "Workspace created; automatic focus cancelled because its connection or dialog changed. Select it from the sidebar.".into();
-                }
-                outcome.repaint = true;
-            } else if visible {
-                let unchanged = created.profile.as_ref().is_none_or(|profile| {
-                    backend::effective_profiles().is_ok_and(|profiles| {
-                        profiles
-                            .iter()
-                            .any(|p| backend::same_destination(p, profile) && p.enabled)
-                    })
-                });
-                let endpoint = created.endpoint.clone();
-                let workspace = created.workspace.clone();
-                self.locations.created = None;
-                if unchanged {
-                    self.overlay = None;
-                    self.focus_or_activate(
-                        endpoint,
-                        ClientEndpointFocusTarget::Workspace(workspace),
-                        outcome,
-                    );
-                } else if let Some(ClientShellOverlay::Locations(dialog)) = self.overlay.as_mut() {
-                    dialog.busy = false;
-                    dialog.message = "Workspace created, but the remote profile changed. Automatic focus cancelled.".into();
-                }
-                outcome.repaint = true;
-            }
-        }
     }
 }
 
@@ -1570,15 +1616,10 @@ mod tests {
             },
         );
         LocationDialog {
-            kind: LocationDialogKind::New,
-            fields: vec![
-                TextEditor::default(),
-                TextEditor::default(),
-                TextEditor::new("/local/project", false),
-            ],
-            selected: 1,
+            kind: LocationDialogKind::Manage,
+            fields: Vec::new(),
+            selected: 0,
             location: 0,
-            location_missing: false,
             profiles: vec![profile],
             prefs,
             message: String::new(),
@@ -1755,7 +1796,9 @@ mod tests {
         assert!(dialog.message.contains("Could not delete"));
     }
 
-    fn save_image_shell(check: Option<SaveCheck>) -> ClientShellState {
+    /// Copy machine… on `box`, past the chooser on `choice`. With `check`, the machine
+    /// check has answered; otherwise it is still running.
+    fn copy_shell(choice: CopyChoice, check: Option<SaveCheck>) -> ClientShellState {
         let mut state = shell();
         state.locations.save_checker = Some(|_| {
             Err(crate::hangar::api::HangarError::Invalid(
@@ -1766,29 +1809,37 @@ mod tests {
         let profile = dialog.profile().unwrap().clone();
         let options = dialog.prefs.remotes[&profile.id].clone();
         state.overlay = Some(ClientShellOverlay::Locations(dialog));
-        state.show_save_image(SaveImageRequest {
-            profile,
-            options,
-            machine_name: "box".into(),
-            check,
-            error: None,
-        });
+        state.show_copy(CopyRequest::new(profile, options, "box".into()));
+        state.switch_copy_choice(choice);
+        state.choose_copy();
+        if let Some(check) = check {
+            state.locations.image_check = None;
+            let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_mut() else {
+                panic!("dialog");
+            };
+            let LocationDialogKind::Copy(request) = &mut dialog.kind else {
+                panic!("copy machine");
+            };
+            request.check = Some(check);
+            dialog.message = request.message();
+        }
         state
     }
 
-    fn save_request(state: &ClientShellState) -> (&LocationDialog, &SaveImageRequest) {
+    fn copy_request(state: &ClientShellState) -> (&LocationDialog, &CopyRequest) {
         let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
             panic!("dialog");
         };
-        let LocationDialogKind::SaveImage(request) = &dialog.kind else {
-            panic!("save as image");
+        let LocationDialogKind::Copy(request) = &dialog.kind else {
+            panic!("copy machine");
         };
         (dialog, request)
     }
 
     fn deliver_check(state: &mut ClientShellState, epoch: u64, check: SaveCheck) {
+        let usage = copy_request(state).1.choice.usage();
         let (send, receive) = mpsc::channel();
-        state.locations.image_check = Some((epoch, receive));
+        state.locations.image_check = Some((epoch, usage, receive));
         send.send(Ok(check)).unwrap();
         state.tick_locations(&mut ClientShellInput::default());
     }
@@ -1801,24 +1852,34 @@ mod tests {
     }
 
     #[test]
-    fn save_as_image_sits_with_fork_and_states_what_is_saved() {
+    fn copy_machine_is_one_action_and_save_as_image_states_what_is_saved() {
         let copies = hangar_dialog()
             .actions()
             .into_iter()
             .filter(|entry| entry.group == view::ActionGroup::Copy)
             .map(|entry| entry.label)
             .collect::<Vec<_>>();
-        assert_eq!(copies, ["Save as image…", "Fork…"]);
-        let mut state = save_image_shell(None);
-        let (dialog, request) = save_request(&state);
+        assert_eq!(copies, ["Copy machine…"]);
+        let mut state = copy_shell(CopyChoice::Image, None);
+        assert!(
+            matches!(
+                state.locations.image_check,
+                Some((_, SnapshotUse::Image, _))
+            ),
+            "checks the machine for an image"
+        );
+        let (dialog, request) = copy_request(&state);
+        assert_eq!(dialog.title(), "save box as image");
         assert_eq!(dialog.labels(), ["Image name", "Description"]);
         assert!(dialog.message.contains("Checking box…"));
         for part in [
-            "root disk only",
-            "Installed packages and system configuration are included",
-            "home directory files, logins and /data/workspace are not",
+            "root disk only: installed software and system settings",
+            "Repositories, home directory files and logins on /data are not included",
             "`sudo gh auth`",
             "/etc/environment",
+            "stopped first",
+            "images tab",
+            "New machine from image…",
             "private",
         ] {
             assert!(dialog.message.contains(part), "{part}: {}", dialog.message);
@@ -1833,20 +1894,20 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         ));
         state.route_location_key(&typed, &mut ClientShellInput::default());
-        assert_eq!(save_request(&state).0.fields[0].as_str(), "basex");
+        assert_eq!(copy_request(&state).0.fields[0].as_str(), "basex");
         state.compose(110, 35).unwrap();
     }
 
     #[test]
     fn a_running_machine_offers_stop_machine_and_save_and_old_templates_refuse() {
-        let mut state = save_image_shell(None);
+        let mut state = copy_shell(CopyChoice::Image, None);
         let epoch = state.locations.epoch;
         let running = SaveCheck {
             plan: Some(SavePlan::Stop),
             note: "box is running. Only a stopped machine can be saved.".into(),
         };
         deliver_check(&mut state, epoch, running);
-        let (dialog, request) = save_request(&state);
+        let (dialog, request) = copy_request(&state);
         assert_eq!(request.primary_label(), " ↵ stop machine and save ");
         assert!(dialog.message.starts_with("box is running."));
         assert!(dialog.message.contains("root disk only"));
@@ -1860,39 +1921,59 @@ mod tests {
                 note: "stale".into(),
             },
         );
-        assert_eq!(save_request(&state).1.plan(), Some(SavePlan::Stop));
-
-        let mut state = save_image_shell(Some(SaveCheck {
+        assert_eq!(copy_request(&state).1.plan(), Some(SavePlan::Stop));
+        // So is a check made for the other choice.
+        let (send, receive) = mpsc::channel();
+        state.locations.image_check = Some((epoch, SnapshotUse::Fork, receive));
+        send.send(Ok(SaveCheck {
             plan: None,
-            note: "box was created from template herdr@old, which is too old to save images from."
-                .into(),
-        }));
+            note: "for a clone".into(),
+        }))
+        .unwrap();
+        state.tick_locations(&mut ClientShellInput::default());
+        assert_eq!(copy_request(&state).1.plan(), Some(SavePlan::Stop));
+
+        let mut state = copy_shell(
+            CopyChoice::Image,
+            Some(SaveCheck {
+                plan: None,
+                note:
+                    "box was created from template herdr@old, which is too old to save images from."
+                        .into(),
+            }),
+        );
         type_name(&mut state, "base");
         state.accept_location(&mut ClientShellInput::default());
         assert!(state.locations.job.is_none(), "an old template never saves");
-        assert_eq!(save_request(&state).1.primary_label(), " ↵ save ");
+        assert_eq!(copy_request(&state).1.primary_label(), " ↵ save ");
     }
 
     #[test]
     fn an_invalid_image_name_stops_nothing() {
-        let mut state = save_image_shell(Some(SaveCheck {
-            plan: Some(SavePlan::Stop),
-            note: String::new(),
-        }));
+        let mut state = copy_shell(
+            CopyChoice::Image,
+            Some(SaveCheck {
+                plan: Some(SavePlan::Stop),
+                note: String::new(),
+            }),
+        );
         type_name(&mut state, "Not Valid");
         state.accept_location(&mut ClientShellInput::default());
         assert!(state.locations.job.is_none());
-        let (dialog, _) = save_request(&state);
+        let (dialog, _) = copy_request(&state);
         assert!(dialog.message.starts_with("Image names use"));
         assert_eq!(dialog.selected, 0);
     }
 
     #[test]
     fn a_failed_save_stays_open_and_rechecks_while_a_saved_one_returns_to_the_list() {
-        let mut state = save_image_shell(Some(SaveCheck {
-            plan: Some(SavePlan::Save),
-            note: String::new(),
-        }));
+        let mut state = copy_shell(
+            CopyChoice::Image,
+            Some(SaveCheck {
+                plan: Some(SavePlan::Save),
+                note: String::new(),
+            }),
+        );
         let (send, receive) = mpsc::channel();
         state.locations.job = Some((state.locations.epoch, receive));
         send.send(Err(
@@ -1900,10 +1981,11 @@ mod tests {
         ))
         .unwrap();
         state.tick_locations(&mut ClientShellInput::default());
-        let (dialog, request) = save_request(&state);
+        let (dialog, request) = copy_request(&state);
         assert!(dialog.message.contains("already exists"));
         assert!(dialog.message.contains("Checking box…"));
         assert!(request.check.is_none());
+        assert!(request.chosen, "the form stays open");
         assert!(state.locations.image_check.is_some(), "checks again");
         let (send, receive) = mpsc::channel();
         state.locations.job = Some((state.locations.epoch, receive));
@@ -1917,57 +1999,31 @@ mod tests {
         assert!(dialog.message.contains("Saved image base"));
     }
 
-    fn fork_shell() -> ClientShellState {
-        let mut state = shell();
-        state.locations.save_checker = Some(|_| {
-            Err(crate::hangar::api::HangarError::Invalid(
-                "offline in tests".into(),
-            ))
-        });
-        let dialog = hangar_dialog();
-        let profile = dialog.profile().unwrap().clone();
-        let options = dialog.prefs.remotes[&profile.id].clone();
-        state.overlay = Some(ClientShellOverlay::Locations(dialog));
-        state.show_fork(ForkRequest {
-            profile,
-            options,
-            machine_name: "box".into(),
-            check: None,
-            error: None,
-        });
-        state.check_save_image();
-        state
-    }
-
-    fn fork_request(state: &ClientShellState) -> (&LocationDialog, &ForkRequest) {
-        let Some(ClientShellOverlay::Locations(dialog)) = state.overlay.as_ref() else {
-            panic!("dialog");
-        };
-        let LocationDialogKind::Fork(request) = &dialog.kind else {
-            panic!("fork machine");
-        };
-        (dialog, request)
-    }
-
     #[test]
-    fn fork_machine_suggests_a_name_and_states_what_is_copied() {
-        let mut state = fork_shell();
-        assert!(state.locations.image_check.is_some(), "checks the machine");
-        let (dialog, request) = fork_request(&state);
-        assert_eq!(dialog.title(), "fork machine");
+    fn clone_now_suggests_a_name_and_states_what_is_copied() {
+        let mut state = copy_shell(CopyChoice::Clone, None);
+        assert!(
+            matches!(state.locations.image_check, Some((_, SnapshotUse::Fork, _))),
+            "checks the machine for a clone"
+        );
+        let (dialog, request) = copy_request(&state);
+        assert_eq!(dialog.title(), "clone box");
         assert_eq!(dialog.labels(), ["Name"]);
-        assert_eq!(dialog.fields[0].as_str(), "box-fork");
+        assert_eq!(dialog.fields[0].as_str(), "box-clone");
         assert!(dialog.message.contains("Checking box…"));
         for part in [
             "root disk and its /data disk",
-            "repositories",
+            "installed software, system settings, repositories",
             "home directory",
             "signed-in credentials (gh, Claude, Codex, SSH keys)",
             "its own SSH host keys",
-            "This machine is left stopped",
+            "starts as a new machine",
+            "remotes tab",
+            "stopped first and stays stopped",
         ] {
             assert!(dialog.message.contains(part), "{part}: {}", dialog.message);
         }
+        assert!(!dialog.message.to_lowercase().contains("fork"));
         assert_eq!(request.plan(), None);
         // Enter does nothing until the check arrives.
         state.accept_location(&mut ClientShellInput::default());
@@ -1982,8 +2038,8 @@ mod tests {
                 note: "box is suspended.".into(),
             },
         );
-        let (dialog, request) = fork_request(&state);
-        assert_eq!(request.primary_label(), " ↵ stop machine and fork ");
+        let (dialog, request) = copy_request(&state);
+        assert_eq!(request.primary_label(), " ↵ stop machine and clone ");
         assert!(dialog.message.starts_with("box is suspended."));
         state.compose(110, 35).unwrap();
         deliver_check(
@@ -1994,12 +2050,12 @@ mod tests {
                 note: String::new(),
             },
         );
-        assert_eq!(fork_request(&state).1.primary_label(), " ↵ fork ");
+        assert_eq!(copy_request(&state).1.primary_label(), " ↵ clone ");
     }
 
     #[test]
-    fn an_invalid_fork_name_or_unforkable_machine_stops_nothing() {
-        let mut state = fork_shell();
+    fn an_invalid_clone_name_or_uncopyable_machine_stops_nothing() {
+        let mut state = copy_shell(CopyChoice::Clone, None);
         let epoch = state.locations.epoch;
         deliver_check(
             &mut state,
@@ -2012,7 +2068,7 @@ mod tests {
         type_name(&mut state, "Box Copy");
         state.accept_location(&mut ClientShellInput::default());
         assert!(state.locations.job.is_none());
-        assert!(fork_request(&state)
+        assert!(copy_request(&state)
             .0
             .message
             .starts_with("Machine names use"));
@@ -2021,17 +2077,20 @@ mod tests {
             epoch,
             SaveCheck {
                 plan: None,
-                note: "box was created from template herdr@old, which is too old to fork.".into(),
+                note: "box was created from template herdr@old, which is too old to clone.".into(),
             },
         );
         type_name(&mut state, "box-copy");
         state.accept_location(&mut ClientShellInput::default());
-        assert!(state.locations.job.is_none(), "an old template never forks");
+        assert!(
+            state.locations.job.is_none(),
+            "an old template never clones"
+        );
     }
 
     #[test]
-    fn a_failed_fork_stays_open_and_rechecks_while_a_fork_returns_to_the_list() {
-        let mut state = fork_shell();
+    fn a_failed_clone_stays_open_and_rechecks_while_a_clone_returns_to_the_list() {
+        let mut state = copy_shell(CopyChoice::Clone, None);
         let epoch = state.locations.epoch;
         deliver_check(
             &mut state,
@@ -2044,11 +2103,11 @@ mod tests {
         let (send, receive) = mpsc::channel();
         state.locations.job = Some((state.locations.epoch, receive));
         send.send(Err(
-            "Could not fork into box-fork: a machine named \"box-fork\" already exists".into(),
+            "Could not clone into box-clone: a machine named \"box-clone\" already exists".into(),
         ))
         .unwrap();
         state.tick_locations(&mut ClientShellInput::default());
-        let (dialog, request) = fork_request(&state);
+        let (dialog, request) = copy_request(&state);
         assert!(dialog.message.contains("already exists"));
         assert!(dialog.message.contains("Checking box…"));
         assert!(request.check.is_none());
@@ -2056,7 +2115,7 @@ mod tests {
         let (send, receive) = mpsc::channel();
         state.locations.job = Some((state.locations.epoch, receive));
         send.send(Ok(JobResult::Message(
-            "Forked box into box-fork. box-fork is ready.".into(),
+            "Cloned box into box-clone. box-clone is ready.".into(),
         )))
         .unwrap();
         state.tick_locations(&mut ClientShellInput::default());
@@ -2064,7 +2123,7 @@ mod tests {
             panic!("dialog");
         };
         assert!(matches!(dialog.kind, LocationDialogKind::Manage));
-        assert!(dialog.message.contains("Forked box into box-fork"));
+        assert!(dialog.message.contains("Cloned box into box-clone"));
     }
 
     #[test]
@@ -2140,77 +2199,335 @@ mod tests {
         state.compose(110, 35).unwrap();
     }
 
-    #[test]
-    fn changing_location_resets_directory_to_that_machines_default() {
-        let mut dialog = dialog();
-        dialog.cycle_location(1);
-        assert_eq!(dialog.fields[2].as_str(), "/remote/project");
-        dialog.fields[2] = TextEditor::new("/remote/edited", false);
-        dialog.cycle_location(-1);
-        assert!(dialog.fields[2].is_empty());
+    /// The remotes with `default` (an index into the profiles: Remote A, then box) as the
+    /// default machine; box is in `state`.
+    fn remotes_with_default(
+        default: Option<usize>,
+        state: MachineState,
+        hidden: bool,
+    ) -> RemotesSnapshot {
+        let mut snapshot = hangar_snapshot(state, hidden);
+        // A fixed ID for Remote A, so every load names the same remote (box's ID is
+        // derived from its machine).
+        let fixed = ProfileId::parse("a".repeat(32)).unwrap();
+        let old = std::mem::replace(&mut snapshot.profiles[0].id, fixed.clone());
+        if let Some(options) = snapshot.prefs.remotes.remove(&old) {
+            snapshot.prefs.remotes.insert(fixed, options);
+        }
+        snapshot.prefs.default_profile = default.map(|index| snapshot.profiles[index].id.clone());
+        snapshot
+    }
+
+    /// A shell showing Local (`ws_1` focused), with Remote A and box known; `online`
+    /// remotes are connected with a snapshot.
+    fn routing_shell(prompt: bool, online: &[usize]) -> ClientShellState {
+        let mut config = Config::default();
+        config.ui.prompt_new_workspace_name = prompt;
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        let profiles = remotes_with_default(None, MachineState::Running, false).profiles;
+        state.set_endpoint_catalog(&profiles);
+        state.set_snapshot(Box::new(super::super::tests::snapshot()));
+        for index in online {
+            let endpoint = ClientEndpointId::Ssh(profiles[*index].id.clone());
+            state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+            state.set_endpoint_snapshot(&endpoint, Box::new(super::super::tests::snapshot()));
+        }
+        state
+    }
+
+    fn new_workspace(state: &mut ClientShellState) -> ClientShellInput {
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::NewWorkspace),
+            &mut outcome,
+        );
+        outcome
+    }
+
+    /// The endpoint and parameters of the one WorkspaceCreate request in `outcome`.
+    fn create_request(
+        outcome: &ClientShellInput,
+    ) -> (ClientEndpointId, crate::api::schema::WorkspaceCreateParams) {
+        let [ClientShellAction::Endpoint {
+            endpoint_id,
+            request,
+            ..
+        }] = &outcome.actions[..]
+        else {
+            panic!("one endpoint request: {:?}", outcome.actions);
+        };
+        let crate::api::schema::Method::WorkspaceCreate(params) = &request.method else {
+            panic!("workspace create: {:?}", request.method);
+        };
+        (endpoint_id.clone(), params.clone())
     }
 
     #[test]
-    fn mouse_and_keyboard_location_selection_have_the_same_directory_policy() {
-        let mut state = shell();
-        state.overlay = Some(ClientShellOverlay::Locations(dialog()));
-        let mut keyboard = shell();
-        keyboard.overlay = Some(ClientShellOverlay::Locations(dialog()));
-        keyboard.route_location_key(
-            &crate::input::TerminalKey::from(crossterm::event::KeyEvent::new(
-                KeyCode::Right,
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &mut ClientShellInput::default(),
+    fn new_workspace_on_a_local_default_creates_like_upstream_without_a_dialog() {
+        for default in [None, Some(5)] {
+            let mut state = routing_shell(false, &[0]);
+            // No default, or a default that no longer exists: Local.
+            state.locations.remotes_loader = Some(if default.is_none() {
+                || Ok(remotes_with_default(None, MachineState::Running, false))
+            } else {
+                || {
+                    let mut snapshot = hangar_snapshot(MachineState::Running, false);
+                    snapshot.prefs.default_profile =
+                        Some(SavedSshEndpoint::new("Gone", "gone", "work").unwrap().id);
+                    Ok(snapshot)
+                }
+            });
+            let outcome = new_workspace(&mut state);
+            assert!(state.overlay.is_none(), "no location dialog");
+            let (endpoint, params) = create_request(&outcome);
+            assert_eq!(endpoint, ClientEndpointId::Local);
+            assert_eq!(params.source_workspace_id.as_deref(), Some("ws_1"));
+            assert_eq!(params.cwd, None);
+            assert_eq!(params.label, None);
+            assert!(params.focus);
+            assert!(state.locations.create.is_none());
+        }
+    }
+
+    #[test]
+    fn prompt_new_workspace_name_asks_for_a_name_then_creates_on_the_default_machine() {
+        // Local default: the upstream name prompt, then the usual request.
+        let mut state = routing_shell(true, &[]);
+        state.locations.remotes_loader =
+            Some(|| Ok(remotes_with_default(None, MachineState::Running, false)));
+        let outcome = new_workspace(&mut state);
+        assert!(outcome.actions.is_empty());
+        assert!(matches!(
+            state.overlay.as_ref(),
+            Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                title: "new workspace",
+                input,
+                target: ClientRenameTarget::NewWorkspace {
+                    source_workspace_id,
+                    destination: None,
+                    ..
+                },
+            })) if input.as_str() == "repo" && source_workspace_id.as_deref() == Some("ws_1")
+        ));
+        let mut outcome = ClientShellInput::default();
+        if let Some(ClientShellOverlay::Rename(rename)) = state.overlay.as_mut() {
+            rename.input = TextEditor::new("named", true);
+        }
+        state.save_rename_overlay(&mut outcome);
+        let (endpoint, params) = create_request(&outcome);
+        assert_eq!(endpoint, ClientEndpointId::Local);
+        assert_eq!(params.label.as_deref(), Some("named"));
+
+        // A connected remote default that is not displayed: the prompt suggests its
+        // directory's name, and the request goes to that machine.
+        let mut state = routing_shell(true, &[0]);
+        state.locations.remotes_loader =
+            Some(|| Ok(remotes_with_default(Some(0), MachineState::Running, false)));
+        new_workspace(&mut state);
+        let Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            input,
+            target:
+                ClientRenameTarget::NewWorkspace {
+                    source_workspace_id,
+                    cwd,
+                    destination: Some(destination),
+                    ..
+                },
+            ..
+        })) = state.overlay.as_ref()
+        else {
+            panic!(
+                "name prompt for another machine: {:?}",
+                state.overlay.is_some()
+            );
+        };
+        assert_eq!(input.as_str(), "project");
+        assert_eq!(
+            source_workspace_id, &None,
+            "never an ID from another machine"
         );
-        state.compose(110, 35).unwrap();
-        let (rect, _) = state
-            .hits
-            .settings_choices
-            .iter()
-            .find(|(_, i)| *i == 1)
+        assert_eq!(cwd.as_deref(), Some("/remote/project"));
+        assert_eq!(destination.profile.as_ref().unwrap().label, "Remote A");
+        let mut outcome = ClientShellInput::default();
+        state.save_rename_overlay(&mut outcome);
+        assert!(
+            outcome.actions.is_empty(),
+            "not sent to the displayed machine"
+        );
+        assert!(state.locations.create.is_some(), "asked on Remote A");
+    }
+
+    #[test]
+    fn new_workspace_on_a_connected_remote_default_uses_its_directory() {
+        // Displayed: the usual request with the machine's default directory.
+        let mut state = routing_shell(false, &[0]);
+        let remote = ClientEndpointId::Ssh(
+            remotes_with_default(None, MachineState::Running, false).profiles[0]
+                .id
+                .clone(),
+        );
+        assert!(state.activate_endpoint_projection(&remote));
+        state.locations.remotes_loader =
+            Some(|| Ok(remotes_with_default(Some(0), MachineState::Running, false)));
+        let outcome = new_workspace(&mut state);
+        assert!(state.overlay.is_none());
+        let (endpoint, params) = create_request(&outcome);
+        assert_eq!(endpoint, remote);
+        assert_eq!(params.cwd.as_deref(), Some("/remote/project"));
+        assert_eq!(params.source_workspace_id.as_deref(), Some("ws_1"));
+
+        // Not displayed: its server is asked directly; nothing goes to Local.
+        let mut state = routing_shell(false, &[0]);
+        state.locations.remotes_loader =
+            Some(|| Ok(remotes_with_default(Some(0), MachineState::Running, false)));
+        let outcome = new_workspace(&mut state);
+        assert!(outcome.actions.is_empty());
+        assert!(state.overlay.is_none());
+        assert!(state.locations.create.is_some());
+        assert_eq!(
+            state.endpoint_notice(),
+            Some("Creating a workspace on Remote A…")
+        );
+        // One at a time.
+        new_workspace(&mut state);
+        assert_eq!(
+            state.endpoint_notice(),
+            Some("A new workspace is still being created")
+        );
+        // A failed request is shown (unit tests never reach another machine).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.locations.create.is_some() && Instant::now() < deadline {
+            state.tick_locations(&mut ClientShellInput::default());
+            std::thread::yield_now();
+        }
+        assert!(state.locations.create.is_none());
+        assert!(state
+            .endpoint_notice()
+            .is_some_and(|notice| notice.contains("disabled in unit tests")));
+
+        // The destination: the default machine with its preference.
+        let state = routing_shell(false, &[0]);
+        let destination = state
+            .new_workspace_destination(remotes_with_default(Some(0), MachineState::Running, false))
             .unwrap();
+        assert_eq!(destination.endpoint(), remote);
+        assert_eq!(destination.cwd().as_deref(), Some("/remote/project"));
+        let destination = state
+            .new_workspace_destination(remotes_with_default(None, MachineState::Running, false))
+            .unwrap();
+        assert_eq!(destination.endpoint(), ClientEndpointId::Local);
+        assert_eq!(destination.cwd(), None, "empty: the server's default");
+    }
+
+    #[test]
+    fn a_default_machine_that_is_not_connected_is_never_started_and_nothing_is_created() {
+        let cases: [(RemotesLoader, &[usize], &str); 4] = [
+            // A stopped hangar machine.
+            (
+                || Ok(remotes_with_default(Some(1), MachineState::Stopped, false)),
+                &[],
+                "Default machine box isn't connected — start it in Settings → remotes, or choose another default.",
+            ),
+            // A running one that is still connecting.
+            (
+                || Ok(remotes_with_default(Some(1), MachineState::Running, false)),
+                &[],
+                "Default machine box isn't connected — start it in Settings → remotes, or choose another default.",
+            ),
+            // A hidden one.
+            (
+                || Ok(remotes_with_default(Some(1), MachineState::Running, true)),
+                &[1],
+                "Default machine box is hidden from the sidebar — show it in Settings → remotes, or choose another default.",
+            ),
+            // An SSH remote that is offline.
+            (
+                || Ok(remotes_with_default(Some(0), MachineState::Running, false)),
+                &[],
+                "Default machine Remote A isn't connected — start it in Settings → remotes, or choose another default.",
+            ),
+        ];
+        for prompt in [false, true] {
+            for (loader, online, notice) in cases {
+                let mut state = routing_shell(prompt, online);
+                state.locations.remotes_loader = Some(loader);
+                let outcome = new_workspace(&mut state);
+                assert!(outcome.actions.is_empty(), "{notice}");
+                assert!(state.overlay.is_none(), "no prompt either: {notice}");
+                assert!(state.locations.create.is_none());
+                assert!(state.locations.job.is_none(), "nothing is started");
+                assert_eq!(state.endpoint_notice(), Some(notice));
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_remote_settings_still_create_a_local_workspace() {
+        let mut state = routing_shell(false, &[]);
+        state.locations.remotes_loader = Some(|| Err("Invalid remote locations".into()));
+        let (endpoint, _) = create_request(&new_workspace(&mut state));
+        assert_eq!(endpoint, ClientEndpointId::Local);
+    }
+
+    #[test]
+    fn every_new_workspace_entry_point_uses_the_default_machine() {
+        // The sidebar's new workspace (several machines) and the mobile menu's entry
+        // reach the same routing as the keybinding: here, a stopped default.
+        let mut state = routing_shell(false, &[0]);
+        state.locations.remotes_loader =
+            Some(|| Ok(remotes_with_default(Some(1), MachineState::Stopped, false)));
+        state.compose(120, 40).unwrap();
+        let button = state.hits.new_workspace;
+        assert!(!button.is_empty());
+        let mut outcome = ClientShellInput::default();
         state.handle_mouse(
             crossterm::event::MouseEvent {
                 kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: rect.x + 1,
-                row: rect.y,
+                column: button.x + 1,
+                row: button.y,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
-            &mut ClientShellInput::default(),
+            &mut outcome,
         );
-        let Some(ClientShellOverlay::Locations(mouse)) = state.overlay.as_ref() else {
-            panic!("dialog");
-        };
-        let Some(ClientShellOverlay::Locations(keys)) = keyboard.overlay.as_ref() else {
-            panic!("dialog");
-        };
-        assert_eq!(mouse.location, keys.location);
-        assert_eq!(mouse.fields[2], keys.fields[2]);
+        assert!(outcome.actions.is_empty());
+        assert!(state.overlay.is_none());
+        assert!(state
+            .endpoint_notice()
+            .is_some_and(|notice| notice.starts_with("Default machine box isn't connected")));
     }
 
-    #[test]
-    fn cancelled_create_result_never_steals_focus() {
-        let mut state = shell();
-        state.overlay = Some(ClientShellOverlay::Locations(dialog()));
-        let (send, receive) = mpsc::channel();
-        state.locations.job = Some((state.locations.epoch, receive));
-        state.close_location();
-        send.send(Ok(JobResult::Created {
-            endpoint: ClientEndpointId::Local,
+    fn created(endpoint: ClientEndpointId, boot_id: &str) -> CreatedLocationWorkspace {
+        CreatedLocationWorkspace {
+            endpoint,
             workspace: "ws_1".into(),
             profile: None,
             stamp: LocationStamp {
                 generation: None,
-                boot_id: "boot-1".into(),
+                boot_id: boot_id.into(),
             },
-        }))
-        .unwrap();
+            origin: ClientEndpointId::Local,
+            deadline: Instant::now() + Duration::from_secs(10),
+        }
+    }
+
+    #[test]
+    fn a_created_workspace_never_steals_focus_once_a_dialog_opened() {
+        let mut state = shell();
+        state.set_snapshot(Box::new(super::super::tests::snapshot()));
+        let (send, receive) = mpsc::channel();
+        state.locations.create = Some(receive);
+        state.overlay = Some(ClientShellOverlay::Locations(dialog()));
+        send.send(Ok(created(ClientEndpointId::Local, "boot-1")))
+            .unwrap();
         let mut outcome = ClientShellInput::default();
         state.tick_locations(&mut outcome);
+        assert!(state.locations.create.is_none());
         assert!(state.locations.created.is_none());
         assert!(outcome.actions.is_empty());
-        assert!(state.overlay.is_none());
+        assert_eq!(
+            state.endpoint_notice(),
+            Some("Workspace created on Local; select it in the sidebar.")
+        );
     }
 
     #[test]
@@ -2220,18 +2537,7 @@ mod tests {
         let endpoint = ClientEndpointId::Ssh(dialog.profiles[0].id.clone());
         state.set_endpoint_catalog(&dialog.profiles);
         state.set_snapshot(Box::new(super::super::tests::snapshot()));
-        state.overlay = Some(ClientShellOverlay::Locations(dialog));
-        state.locations.created = Some(CreatedLocationWorkspace {
-            epoch: state.locations.epoch,
-            endpoint: endpoint.clone(),
-            workspace: "ws_1".into(),
-            profile: None,
-            stamp: LocationStamp {
-                generation: None,
-                boot_id: "boot-1".into(),
-            },
-            deadline: Instant::now() + Duration::from_secs(5),
-        });
+        state.locations.created = Some(created(endpoint.clone(), "boot-1"));
         let mut outcome = ClientShellInput::default();
         state.tick_locations(&mut outcome);
         assert!(outcome.actions.is_empty());
@@ -2247,9 +2553,43 @@ mod tests {
     }
 
     #[test]
+    fn popup_takeover_another_machine_or_server_reboot_cancels_delayed_create_focus() {
+        for case in ["popup", "reboot", "moved"] {
+            let mut state = shell();
+            let dialog = dialog();
+            let endpoint = ClientEndpointId::Ssh(dialog.profiles[0].id.clone());
+            state.set_endpoint_catalog(&dialog.profiles);
+            state.set_snapshot(Box::new(super::super::tests::snapshot()));
+            state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+            state.set_endpoint_snapshot(&endpoint, Box::new(super::super::tests::snapshot()));
+            let mut pending = created(
+                endpoint.clone(),
+                if case == "reboot" {
+                    "prior-boot"
+                } else {
+                    "boot-1"
+                },
+            );
+            match case {
+                "popup" => state.overlay = Some(ClientShellOverlay::Locations(dialog)),
+                // Another machine was displayed when New workspace was chosen.
+                "moved" => pending.origin = endpoint.clone(),
+                _ => {}
+            }
+            state.locations.created = Some(pending);
+            let mut outcome = ClientShellInput::default();
+            state.tick_locations(&mut outcome);
+            assert!(outcome.actions.is_empty(), "{case}");
+            assert!(state.locations.created.is_none(), "{case}");
+        }
+    }
+
+    #[test]
     fn remote_management_survives_disconnection_and_consumes_paste_locally() {
         let mut state = shell();
         let mut dialog = dialog();
+        dialog.kind = LocationDialogKind::Edit(None);
+        dialog.fields = vec![TextEditor::default()];
         dialog.selected = 0;
         state.overlay = Some(ClientShellOverlay::Locations(dialog));
         state.reset_endpoint_projection();
@@ -2271,37 +2611,7 @@ mod tests {
         assert_eq!(dialog.profile().map(|p| &p.id), Some(&second.id));
         dialog.replace_profiles(Vec::new());
         assert!(dialog.profile().is_none());
-        assert!(dialog.location_missing);
-        dialog.cycle_location(1);
-        assert!(!dialog.location_missing);
-        assert!(dialog.fields[2].is_empty());
-    }
-
-    #[test]
-    fn popup_takeover_or_server_reboot_cancels_delayed_create_focus() {
-        for popup in [true, false] {
-            let mut state = shell();
-            state.set_snapshot(Box::new(super::super::tests::snapshot()));
-            state.overlay = Some(ClientShellOverlay::Locations(dialog()));
-            state.locations.created = Some(CreatedLocationWorkspace {
-                epoch: state.locations.epoch,
-                endpoint: ClientEndpointId::Local,
-                workspace: "ws_1".into(),
-                profile: None,
-                stamp: LocationStamp {
-                    generation: None,
-                    boot_id: if popup { "boot-1" } else { "prior-boot" }.into(),
-                },
-                deadline: Instant::now() + Duration::from_secs(10),
-            });
-            if popup {
-                state.overlay = None;
-            }
-            let mut outcome = ClientShellInput::default();
-            state.tick_locations(&mut outcome);
-            assert!(outcome.actions.is_empty());
-            assert!(state.locations.created.is_none());
-        }
+        assert_eq!(dialog.location_label(), "Local");
     }
 
     #[test]

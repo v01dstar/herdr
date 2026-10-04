@@ -5,6 +5,8 @@ mod remotes_overlay;
 mod settings_overlay;
 pub(in crate::client::shell) use location_overlay::render_locations;
 #[cfg(test)]
+pub(in crate::client::shell) use location_overlay::{CHECK, COPY_TABLE, CROSS};
+#[cfg(test)]
 pub(in crate::client::shell) use settings_overlay::layout_settings_tabs;
 pub(in crate::client::shell) use settings_overlay::render_settings_overlay;
 mod worktree_overlays;
