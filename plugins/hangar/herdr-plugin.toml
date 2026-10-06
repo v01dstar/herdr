@@ -1,0 +1,53 @@
+id = "v01dstar.hangar"
+name = "Hangar"
+version = "0.2.0"
+min_herdr_version = "0.9.0"
+description = "hangar cloud machines in herdr: sign in, create, start, stop, copy and connect them"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-o", "bin/herdr-hangar", "."]
+
+# Reconcile herdr's saved machines with hangar when herdr starts...
+[[startup]]
+command = ["bin/herdr-hangar", "sync"]
+
+# ...and, at most once a minute, as you move around.
+[[events]]
+on = "workspace.focused"
+command = ["bin/herdr-hangar", "sync", "--if-stale"]
+
+[[events]]
+on = "workspace.created"
+command = ["bin/herdr-hangar", "sync", "--if-stale"]
+
+[[actions]]
+id = "open"
+title = "hangar settings"
+contexts = ["workspace"]
+command = ["bin/herdr-hangar", "open"]
+
+[[actions]]
+id = "new-workspace"
+title = "New workspace on the default machine"
+contexts = ["workspace"]
+command = ["bin/herdr-hangar", "new-workspace"]
+
+# Switch these to placement = "popup" once the installed herdr supports it.
+[[panes]]
+id = "ui"
+title = "hangar settings"
+placement = "overlay"
+command = ["bin/herdr-hangar", "ui"]
+
+[[panes]]
+id = "images"
+title = "hangar settings"
+placement = "overlay"
+command = ["bin/herdr-hangar", "ui", "images"]
+
+[[panes]]
+id = "account"
+title = "hangar settings"
+placement = "overlay"
+command = ["bin/herdr-hangar", "ui", "account"]

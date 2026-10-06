@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""A fake herdr CLI for tests: saved machines live in $FAKE_DIR/herdr.json."""
+import json, os, sys
+
+path = os.path.join(os.environ["FAKE_DIR"], "herdr.json")
+st = json.load(open(path)) if os.path.exists(path) else {"profiles": [], "notifications": [], "workspaces": []}
+log = open(os.path.join(os.environ["FAKE_DIR"], "calls.log"), "a")
+args = sys.argv[1:]
+log.write("herdr " + " ".join(args) + "\n")
+
+def save():
+    # Atomic, so concurrent fake calls never read a half-written file.
+    tmp = "%s.%d" % (path, os.getpid())
+    json.dump(st, open(tmp, "w"), indent=1)
+    os.replace(tmp, path)
+
+def fail(msg):
+    print("herdr: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+def find(pid):
+    for p in st["profiles"]:
+        if p["id"] == pid or p["label"] == pid:
+            return p
+    fail("no saved machine " + pid)
+
+machine = None
+if args[:1] == ["--machine"]:
+    machine = find(args[1])
+    args = args[2:]
+
+if args[:2] == ["machine", "list"]:
+    print(json.dumps(st["profiles"]))
+elif args[:2] == ["machine", "add"]:
+    target = args[2]
+    label = args[args.index("--label") + 1] if "--label" in args else target
+    session = args[args.index("--remote-session") + 1] if "--remote-session" in args else "default"
+    if any(p["label"] == label for p in st["profiles"]):
+        fail("label %s is already used; pass --label" % label)
+    if os.environ.get("FAKE_ADD_FAILS"):
+        fail("ssh: connect to host %s: Connection refused" % target)
+    st["profiles"].append({"id": "p%d" % (len(st["profiles"]) + 100), "label": label, "target": target,
+                           "session": session, "enabled": True})
+elif args[:2] == ["machine", "remove"]:
+    p = find(args[2]); st["profiles"].remove(p)
+elif args[:2] in (["machine", "enable"], ["machine", "disable"]):
+    find(args[2])["enabled"] = args[1] == "enable"
+elif args[:2] == ["machine", "rename"]:
+    find(args[2])["label"] = args[args.index("--label") + 1]
+elif args[:2] == ["machine", "status"]:
+    p = find(args[2])
+    print(json.dumps([{"id": p["id"], "label": p["label"], "status": "reachable" if p["enabled"] else "disabled", "error": None}]))
+elif args[:2] == ["notification", "show"]:
+    st["notifications"].append({"title": args[2], "body": args[args.index("--body") + 1]})
+elif args[:2] == ["workspace", "create"]:
+    st["workspaces"].append(machine["label"] if machine else "local")
+else:
+    fail("unexpected: " + " ".join(sys.argv[1:]))
+save()
