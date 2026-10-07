@@ -69,12 +69,13 @@ func readState() State {
 	return s
 }
 
-// updateState applies f to the state under an exclusive lock.
-func updateState(f func(*State)) error {
+// withLock runs f while holding an exclusive lock on the named file in the
+// state directory, across processes. Locks are not reentrant.
+func withLock(name string, f func() error) error {
 	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(filepath.Join(stateDir(), "state.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := os.OpenFile(filepath.Join(stateDir(), name), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -83,6 +84,20 @@ func updateState(f func(*State)) error {
 		return err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return f()
+}
+
+// withMachinesLock serializes every change to herdr's saved machines. Without
+// it, overlapping syncs (startup, workspace events, the open pane) each see a
+// machine missing and each add it.
+func withMachinesLock(f func() error) error { return withLock("machines.lock", f) }
+
+// updateState applies f to the state under an exclusive lock.
+func updateState(f func(*State)) error {
+	return withLock("state.lock", func() error { return writeState(f) })
+}
+
+func writeState(f func(*State)) error {
 	s := readState()
 	f(&s)
 	data, err := json.MarshalIndent(s, "", "  ")

@@ -21,6 +21,8 @@ type Profile struct {
 	Target  string `json:"target"`
 	Session string `json:"session"`
 	Enabled bool   `json:"enabled"`
+	// Selected is the machine the client is showing.
+	Selected bool `json:"selected"`
 }
 
 // MachineID is the hangar machine a managed profile stands for.
@@ -53,12 +55,27 @@ func splitProfiles(all []Profile) (managed map[string]Profile, ssh []Profile) {
 	managed = map[string]Profile{}
 	for _, p := range all {
 		if id, ok := p.MachineID(); ok {
-			managed[id] = p
+			// Of duplicates, keep the one the client is showing.
+			if q, dup := managed[id]; !dup || (p.Selected && !q.Selected) {
+				managed[id] = p
+			}
 		} else {
 			ssh = append(ssh, p)
 		}
 	}
 	return managed, ssh
+}
+
+// duplicateProfiles lists the managed profiles that splitProfiles did not keep.
+func duplicateProfiles(all []Profile) []Profile {
+	managed, _ := splitProfiles(all)
+	var dups []Profile
+	for _, p := range all {
+		if id, ok := p.MachineID(); ok && managed[id].ID != p.ID {
+			dups = append(dups, p)
+		}
+	}
+	return dups
 }
 
 // machineStatus runs herdr's noninteractive check of a saved machine and

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """A fake herdr CLI for tests: saved machines live in $FAKE_DIR/herdr.json."""
-import json, os, sys
+import fcntl, json, os, sys, time
+
+args = sys.argv[1:]
+if args[:2] == ["machine", "add"] and os.environ.get("FAKE_ADD_DELAY"):
+    # herdr checks the remote before saving it, which takes a while.
+    time.sleep(float(os.environ["FAKE_ADD_DELAY"]))
+# The herdr server applies one change at a time.
+lock = open(os.path.join(os.environ["FAKE_DIR"], "herdr.lock"), "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
 
 path = os.path.join(os.environ["FAKE_DIR"], "herdr.json")
 st = json.load(open(path)) if os.path.exists(path) else {"profiles": [], "notifications": [], "workspaces": []}
 log = open(os.path.join(os.environ["FAKE_DIR"], "calls.log"), "a")
-args = sys.argv[1:]
 log.write("herdr " + " ".join(args) + "\n")
 
 def save():
@@ -35,11 +42,10 @@ elif args[:2] == ["machine", "add"]:
     target = args[2]
     label = args[args.index("--label") + 1] if "--label" in args else target
     session = args[args.index("--remote-session") + 1] if "--remote-session" in args else "default"
-    if any(p["label"] == label for p in st["profiles"]):
-        fail("label %s is already used; pass --label" % label)
     if os.environ.get("FAKE_ADD_FAILS"):
         fail("ssh: connect to host %s: Connection refused" % target)
-    st["profiles"].append({"id": "p%d" % (len(st["profiles"]) + 100), "label": label, "target": target,
+    st["next"] = st.get("next", 100) + 1
+    st["profiles"].append({"id": "p%d" % st["next"], "label": label, "target": target,
                            "session": session, "enabled": True})
 elif args[:2] == ["machine", "remove"]:
     p = find(args[2]); st["profiles"].remove(p)

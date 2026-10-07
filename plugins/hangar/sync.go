@@ -30,9 +30,17 @@ type syncResult struct {
 	Err  error
 }
 
-// syncAll reconciles everything. It is safe to run from several processes; the
-// worst case is a duplicate herdr call that fails harmlessly.
+// syncAll reconciles everything. Several processes may call it at once; they
+// take turns.
 func syncAll() syncResult {
+	var r syncResult
+	if err := withMachinesLock(func() error { r = syncLocked(); return nil }); err != nil {
+		r.Err = err
+	}
+	return r
+}
+
+func syncLocked() syncResult {
 	var r syncResult
 	r.Account = whoami()
 	_ = updateState(func(s *State) { s.LastSync = time.Now() })
@@ -40,7 +48,7 @@ func syncAll() syncResult {
 	case r.Account.SignedOut:
 		r.Note = "signed out"
 		if hasLocalTraces() {
-			r.Err = cleanupLocal()
+			r.Err = cleanupLocalLocked()
 		}
 	case r.Account.Err != nil:
 		r.Note = "offline"
@@ -64,8 +72,15 @@ func syncAll() syncResult {
 
 // syncIfStale is the cheap entry for frequent triggers such as workspace events.
 func syncIfStale() error {
-	if time.Since(readState().LastSync) < staleSyncAfter {
-		return nil
+	// Claim the sync atomically, so a burst of events runs it once.
+	stale := false
+	if err := updateState(func(s *State) {
+		if time.Since(s.LastSync) >= staleSyncAfter {
+			stale = true
+			s.LastSync = time.Now()
+		}
+	}); err != nil || !stale {
+		return err
 	}
 	return syncAll().Err
 }
@@ -78,6 +93,11 @@ func reconcile(machines []Machine) error {
 	managed, _ := splitProfiles(all)
 	st := readState()
 	var errs []error
+	for _, p := range duplicateProfiles(all) {
+		if _, err := herdr("machine", "remove", p.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	seen := map[string]bool{}
 	for _, m := range machines {
 		seen[m.ID] = true
@@ -185,14 +205,19 @@ func addMachine(m Machine, label string) error {
 // readdMachine replaces a machine's herdr profile, so herdr starts the remote
 // session again (after Start, the old session is gone).
 func readdMachine(m Machine) error {
+	return withMachinesLock(func() error { return readdLocked(m) })
+}
+
+func readdLocked(m Machine) error {
 	all, err := listProfiles()
 	if err != nil {
 		return err
 	}
-	managed, _ := splitProfiles(all)
-	if p, ok := managed[m.ID]; ok {
-		if _, err := herdr("machine", "remove", p.ID); err != nil {
-			return err
+	for _, p := range all {
+		if id, ok := p.MachineID(); ok && id == m.ID {
+			if _, err := herdr("machine", "remove", p.ID); err != nil {
+				return err
+			}
 		}
 	}
 	st := readState()
@@ -216,31 +241,39 @@ func ensureHostBlock(m Machine) error {
 // stops reconnecting before the machine goes away.
 func disconnect(id string) error {
 	_ = updateState(func(s *State) { s.Fence[id] = time.Now().Add(fenceFor) })
-	all, err := listProfiles()
-	if err != nil {
-		return err
-	}
-	managed, _ := splitProfiles(all)
-	if p, ok := managed[id]; ok && p.Enabled {
-		_, err = herdr("machine", "disable", p.ID)
-	}
-	return err
+	return withMachinesLock(func() error {
+		all, err := listProfiles()
+		if err != nil {
+			return err
+		}
+		for _, p := range all {
+			if mid, ok := p.MachineID(); ok && mid == id && p.Enabled {
+				if _, err := herdr("machine", "disable", p.ID); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // forgetMachine removes a deleted machine from herdr and the plugin state.
 func forgetMachine(id string) error {
-	all, err := listProfiles()
-	if err != nil {
-		return err
-	}
-	managed, _ := splitProfiles(all)
-	if p, ok := managed[id]; ok {
-		if _, err := herdr("machine", "remove", p.ID); err != nil {
+	return withMachinesLock(func() error {
+		all, err := listProfiles()
+		if err != nil {
 			return err
 		}
-	}
-	removeHostBlock(id)
-	return updateState(func(s *State) { s.forget(id) })
+		for _, p := range all {
+			if mid, ok := p.MachineID(); ok && mid == id {
+				if _, err := herdr("machine", "remove", p.ID); err != nil {
+					return err
+				}
+			}
+		}
+		removeHostBlock(id)
+		return updateState(func(s *State) { s.forget(id) })
+	})
 }
 
 // hasLocalTraces reports whether a sign-out cleanup has anything to do.
@@ -262,13 +295,17 @@ func hasLocalTraces() bool {
 // cleanupLocal removes the managed herdr machines, their Host blocks and the
 // Include line. Hidden machines, names and the default are kept for the next
 // sign-in; machines on the server are untouched.
-func cleanupLocal() error {
+func cleanupLocal() error { return withMachinesLock(cleanupLocalLocked) }
+
+func cleanupLocalLocked() error {
 	var errs []error
 	if all, err := listProfiles(); err != nil {
 		errs = append(errs, err)
 	} else {
-		managed, _ := splitProfiles(all)
-		for _, p := range managed {
+		for _, p := range all {
+			if _, ok := p.MachineID(); !ok {
+				continue
+			}
 			if _, err := herdr("machine", "remove", p.ID); err != nil {
 				errs = append(errs, fmt.Errorf("remove %s from herdr: %w", p.Label, err))
 			}

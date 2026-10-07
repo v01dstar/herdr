@@ -87,6 +87,10 @@ Things a plugin cannot do with herdr's current plugin API:
 - Between reconciliations herdr may briefly show a machine that changed state
   elsewhere (for example, auto-suspended) as reconnecting.
 - herdr's sidebar has no hangar actions; use the pane.
+- Key bindings for the plugin's actions work only while Local is the active
+  machine. herdr sends a custom key binding to the active machine's server,
+  and a remote machine's server has neither the binding nor the plugin.
+  Switch to Local in the sidebar first.
 
 ## Development
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -47,6 +48,7 @@ func newFake(t *testing.T, machines ...map[string]any) *fakeEnv {
 	t.Setenv("HERDR_BIN_PATH", filepath.Join(fake, "herdr"))
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(dir, "state"))
 	t.Setenv("FAKE_ADD_FAILS", "")
+	t.Setenv("FAKE_ADD_DELAY", "")
 	f := &fakeEnv{t: t, dir: dir, home: home}
 	f.writeHangar(fakeHangar{SignedIn: true, Machines: machines})
 	return f
@@ -415,5 +417,50 @@ func TestValidation(t *testing.T) {
 	}
 	if _, problem := validateInvite("hgi_short"); problem == "" {
 		t.Error("short invite accepted")
+	}
+}
+
+func (f *fakeEnv) profiles(machineID string) int {
+	n := 0
+	for _, p := range f.herdr().Profiles {
+		if p.Target == TargetPrefix+machineID {
+			n++
+		}
+	}
+	return n
+}
+
+// Startup, workspace events and the open pane can all sync at once; a running
+// machine must still be saved once.
+func TestConcurrentSyncsAddOnce(t *testing.T) {
+	f := newFake(t, fakeMachine("m_a", "alpha", "running"))
+	t.Setenv("FAKE_ADD_DELAY", "0.3")
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			syncAll()
+		}()
+	}
+	wg.Wait()
+	if n := f.profiles("m_a"); n != 1 {
+		t.Fatalf("alpha saved %d times, want 1", n)
+	}
+}
+
+func TestSyncRemovesDuplicateProfiles(t *testing.T) {
+	f := newFake(t, fakeMachine("m_a", "alpha", "running"))
+	dup := Profile{Label: "alpha", Target: TargetPrefix + "m_a", Session: RemoteSession, Enabled: true}
+	h := f.herdr()
+	for _, id := range []string{"p1", "p2", "p3"} {
+		dup.ID = id
+		h.Profiles = append(h.Profiles, dup)
+	}
+	h.Profiles[1].Selected = true
+	f.writeJSON("herdr.json", h)
+	f.sync()
+	if p, _ := f.profile("m_a"); f.profiles("m_a") != 1 || p.ID != "p2" {
+		t.Fatalf("after sync: %+v, want only the selected p2", f.herdr().Profiles)
 	}
 }
