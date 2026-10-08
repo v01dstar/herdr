@@ -6,7 +6,8 @@
 //	herdr-instabox new-workspace          new workspace on the default machine
 //	herdr-instabox sync [--if-stale]      reconcile herdr with instabox (hooks)
 //	herdr-instabox job ID                 run a background job (internal)
-//	herdr-instabox ensure-cert ID BIN     refresh a certificate (ssh Match exec)
+//	herdr-instabox login [github|google] sign in (run in the pane's terminal)
+//	herdr-instabox ensure-cert ID DIR     renew a certificate (ssh Match exec)
 package main
 
 import (
@@ -46,7 +47,9 @@ func main() {
 	case "job":
 		err = runJob(arg(2))
 	case "ensure-cert":
-		ensureCert(arg(2), arg(3))
+		runEnsureCert(arg(2), arg(3))
+	case "login":
+		err = login(arg(2))
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
 	}

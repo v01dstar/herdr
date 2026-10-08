@@ -5,8 +5,10 @@ copy and delete machines from a settings pane modelled on herdr's own
 Settings → remotes / snapshots / account; running machines appear in herdr's
 sidebar on their own, like any saved SSH machine. herdr itself is unmodified.
 
-It drives the `instabox` CLI (sign-in, API, certificates) and the `herdr` CLI
-(saved machines, workspaces, notifications). Linux and macOS.
+It talks to the instabox API (`https://api.box.instacloud.com`, or
+`INSTABOX_SERVER`) directly and drives the `herdr` CLI (saved machines,
+workspaces, notifications). The instabox CLI is not needed; the plugin has its
+own sign-in, separate from the CLI's. Linux and macOS.
 
 ## Install
 
@@ -68,12 +70,14 @@ A machine that has not been running since you signed in cannot be saved yet
 
 SSH: each machine gets a Host block `herdr-instabox-<machine id>` in the plugin's
 state directory, pulled in by one `Include` line that signing in adds to the top
-of `~/.ssh/config` (a backup is kept as `~/.ssh/config.herdr-instabox.bak`). A
-`Match exec` in front of each block renews the short-lived certificate before a
-connection when it is close to expiry.
+of `~/.ssh/config` (a backup is kept as `~/.ssh/config.herdr-instabox.bak`). The
+plugin connects with its own SSH key and 24-hour certificates the API issues
+for it; a `Match exec` in front of each block renews the certificate before a
+connection when less than 10 minutes are left. The gateway checks a
+certificate only when a connection opens, so an open connection outlives it.
 
-Signing out removes every local trace: the herdr machines, the Host blocks and
-the `Include` line. The machines keep running on instabox, and their herdr-only
+Signing out revokes the sign-in and removes every local trace: the herdr
+machines, the Host blocks, the SSH key and certificates, and the `Include` line. The machines keep running on instabox, and their herdr-only
 names, hidden state and the default are kept for the next sign-in.
 
 ## Differences from built-in support
@@ -95,6 +99,6 @@ Things a plugin cannot do with herdr's current plugin API:
 ## Development
 
 ```bash
-go test ./...        # runs against the fake instabox/herdr CLIs in testdata/fake
+go test ./...        # runs against a fake instabox API and the fake herdr CLI in testdata/fake
 go build -o bin/herdr-instabox .
 ```

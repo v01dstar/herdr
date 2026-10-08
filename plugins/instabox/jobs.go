@@ -181,12 +181,12 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 	name := j.MachineName
 	switch j.Kind {
 	case jobCreate:
-		return createMachine(j, progress)
+		return runCreate(j, progress)
 
 	case jobStart:
 		progress("Starting %s…", name)
 		_ = updateState(func(s *State) { delete(s.Fence, j.MachineID) })
-		if _, err := instabox("start", j.MachineID); err != nil {
+		if err := startMachine(j.MachineID); err != nil {
 			return "", err
 		}
 		if err := connectWhenReady(j.MachineID, progress, true); err != nil {
@@ -197,7 +197,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 	case jobResume:
 		progress("Resuming %s…", name)
 		_ = updateState(func(s *State) { delete(s.Fence, j.MachineID) })
-		if _, err := instabox("resume", j.MachineID); err != nil {
+		if err := resumeMachine(j.MachineID); err != nil {
 			return "", err
 		}
 		if err := connectWhenReady(j.MachineID, progress, false); err != nil {
@@ -210,7 +210,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 		if err := disconnect(j.MachineID); err != nil {
 			return "", err
 		}
-		if _, err := instabox("suspend", j.MachineID); err != nil {
+		if err := suspendMachine(j.MachineID); err != nil {
 			return "", err
 		}
 		return name + ": suspended. Running programs continue after Resume.", nil
@@ -221,7 +221,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 			return "", err
 		}
 		warning := stopRemoteSession(j.MachineID)
-		if _, err := instabox("stop", j.MachineID); err != nil {
+		if err := stopMachine(j.MachineID); err != nil {
 			return "", err
 		}
 		if warning != "" {
@@ -233,7 +233,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 		progress("Deleting %s…", name)
 		_ = disconnect(j.MachineID)
 		_ = stopRemoteSession(j.MachineID)
-		_, err := instabox("rm", j.MachineID)
+		err := deleteMachine(j.MachineID)
 		switch {
 		case notFound(err):
 			_ = forgetMachine(j.MachineID)
@@ -252,10 +252,10 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 			return "", err
 		}
 		progress("Cloning %s into %s…", name, j.Name)
-		if _, err := instabox("fork", j.MachineID, j.Name); err != nil {
+		if err := forkMachine(j.MachineID, j.Name); err != nil {
 			return "", err
 		}
-		if m, err := getMachine(j.Name); err == nil && m.State == "running" {
+		if m, err := machineByName(j.Name); err == nil && m.State == "running" {
 			if err := connectWhenReady(m.ID, progress, true); err != nil {
 				return "", err
 			}
@@ -272,11 +272,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 			return "", err
 		}
 		progress("Saving snapshot %s from %s…", j.Name, name)
-		args := []string{"snapshot", "save", j.MachineID, "--name", j.Name}
-		if j.Description != "" {
-			args = append(args, "--description", j.Description)
-		}
-		if _, err := instabox(args...); err != nil {
+		if err := createSnapshot(j.MachineID, j.Name, j.Description); err != nil {
 			return "", err
 		}
 		msg := fmt.Sprintf("Saved snapshot %s from %s. It is listed on the snapshots tab; New machine from snapshot… starts machines from it.", j.Name, name)
@@ -287,7 +283,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 
 	case jobDeleteSnapshot:
 		progress("Deleting snapshot %s…", j.SnapshotName)
-		_, err := instabox("snapshot", "rm", j.Snapshot)
+		err := deleteSnapshot(j.Snapshot)
 		if notFound(err) {
 			return fmt.Sprintf("Snapshot %s was already deleted.", j.SnapshotName), nil
 		}
@@ -299,23 +295,24 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 	return "", fmt.Errorf("unknown job kind %q", j.Kind)
 }
 
-func createMachine(j *Job, progress func(string, ...any)) (string, error) {
-	args := []string{"create", "--name", j.Name, "--no-wait"}
+func runCreate(j *Job, progress func(string, ...any)) (string, error) {
 	if j.Snapshot != "" {
-		args = append(args, "--snapshot", j.Snapshot)
 		progress("Creating instabox machine %s from snapshot %s…", j.Name, j.SnapshotName)
 	} else {
-		args = append(args, "--template", "herdr")
 		progress("Creating instabox machine %s…", j.Name)
 	}
-	if _, err := instabox(args...); err != nil {
+	op, err := createMachine(j.Name, "herdr", j.Snapshot)
+	if err != nil {
 		return "", err
 	}
 	deadline := time.Now().Add(15 * time.Minute)
 	var m Machine
 	for {
-		var err error
-		m, err = getMachine(j.Name)
+		if op.MachineID != "" {
+			m, err = getMachine(op.MachineID)
+		} else {
+			m, err = machineByName(j.Name)
+		}
 		if err == nil {
 			switch m.State {
 			case "running":
@@ -379,9 +376,7 @@ func reconcileMachine(m Machine) error {
 // stopRemoteSession asks the machine's Herdr session to shut down cleanly
 // before the machine stops. Best effort: it returns a warning, never an error.
 func stopRemoteSession(id string) string {
-	_, err := instabox("exec", id, "--timeout", "20", "--",
-		"herdr", "--session", RemoteSession, "server", "stop")
-	if err != nil {
+	if err := execOnMachine(id, "herdr --session "+RemoteSession+" server stop", 20); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -400,11 +395,10 @@ func prepareStopped(id, name string, progress func(string, ...any)) (bool, error
 			return false, nil
 		}
 		progress("Uploading the changes on %s…", name)
-		_, err = instabox("stop", id)
-		return true, err
+		return true, stopMachine(id)
 	case "suspended":
 		progress("Resuming %s so it can stop…", name)
-		if _, err := instabox("resume", id); err != nil {
+		if err := resumeMachine(id); err != nil {
 			return false, err
 		}
 		fallthrough
@@ -414,8 +408,7 @@ func prepareStopped(id, name string, progress func(string, ...any)) (bool, error
 			return false, err
 		}
 		_ = stopRemoteSession(id)
-		_, err = instabox("stop", id)
-		return true, err
+		return true, stopMachine(id)
 	}
 	return false, errors.New("Wait until it is stopped or running, then try again.")
 }

@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const accountNote = "Herdr and the instabox CLI share this sign-in (~/.config/instabox/credentials.json). Sign in opens your browser; over SSH or without a browser it shows a code to enter instead (GitHub only)."
+const accountNote = "This sign-in belongs to herdr; the instabox CLI has its own. Sign in opens your browser; over SSH or without a browser it shows a code to enter instead (GitHub only)."
 
 func (m model) accountActions() []action {
 	if m.acct.SignedIn() || (m.acct.Err != nil && !m.acct.SignedOut) {
@@ -76,20 +77,20 @@ func (m model) runAccountAction() (tea.Model, tea.Cmd) {
 		m.dialog = &dialog{confirm: &confirm{
 			title: "sign out of instabox",
 			verb:  "sign out",
-			body:  fmt.Sprintf("Sign out of instabox on %s? This revokes the sign-in on the server and removes ~/.config/instabox/credentials.json, which the instabox CLI shares, so `instabox` commands are signed out too. Herdr forgets the instabox machines and removes their SSH config; the machines keep running, and signing in again brings them back.", server),
+			body:  fmt.Sprintf("Sign out of instabox on %s? This revokes herdr's sign-in on the server. Herdr forgets the instabox machines and removes their SSH config and keys; the machines keep running, and signing in again brings them back. The instabox CLI's own sign-in is not affected.", server),
 			run: func(m *model) tea.Cmd {
 				m.say(msgInfo, "Signing out…")
 				return quick(true, func() (string, error) {
 					// Clean up while still signed in, then sign out even if
 					// part of it failed; the next sync retries the rest.
 					cleanErr := cleanupLocal()
-					if _, err := instabox("logout"); err != nil {
+					if err := signOut(); err != nil {
 						return "", err
 					}
 					if cleanErr != nil {
 						return "", fmt.Errorf("Signed out of instabox on %s, but: %w", server, cleanErr)
 					}
-					return fmt.Sprintf("Signed out of instabox on %s. The instabox CLI is signed out too.", server), nil
+					return fmt.Sprintf("Signed out of instabox on %s.", server), nil
 				})
 			},
 		}}
@@ -98,8 +99,8 @@ func (m model) runAccountAction() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// signIn hands the terminal to `instabox login`, which opens the browser or shows
-// a device code. Switching accounts first clears the old account's machines.
+// signIn hands the terminal to `herdr-instabox login`, which opens the browser
+// or shows a device code. Switching accounts first clears the old account's machines.
 func (m model) signIn(provider string) (tea.Model, tea.Cmd) {
 	if m.acct.SignedIn() {
 		if err := cleanupLocal(); err != nil {
@@ -107,9 +108,13 @@ func (m model) signIn(provider string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	args := []string{"login", "--provider", provider}
+	self, err := os.Executable()
+	if err != nil {
+		m.say(msgErr, "%v", err)
+		return m, nil
+	}
 	m.say(msgInfo, "Starting sign-in…")
-	return m, interactive(instaboxBin(), args, func() (string, error) {
+	return m, interactive(self, []string{"login", provider}, func() (string, error) {
 		acct := whoami()
 		if !acct.SignedIn() {
 			return "", fmt.Errorf("sign-in did not complete")

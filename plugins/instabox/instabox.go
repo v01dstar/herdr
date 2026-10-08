@@ -2,20 +2,16 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
+	"net/http"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
 
-// The instabox CLI is the plugin's only path to the control plane: it owns the
-// sign-in (~/.config/instabox/credentials.json), certificates and the API.
+// Types of the instabox API that the plugin reads.
 
 type Spec struct {
 	VCPUs             int `json:"vcpus"`
@@ -107,7 +103,7 @@ type Usage struct {
 	} `json:"limits"`
 }
 
-// Account is the parsed `instabox whoami`.
+// Account is who the plugin is signed in as.
 type Account struct {
 	Login, UserID, Server string
 	// SignedOut is a definite "nobody is signed in"; Err is any other failure,
@@ -121,24 +117,8 @@ func (a Account) SignedIn() bool { return a.Login != "" }
 // Key identifies an account across sign-ins.
 func (a Account) Key() string { return a.UserID + "@" + a.Server }
 
-func instaboxBin() string {
-	if bin := os.Getenv("INSTABOX_BIN"); bin != "" {
-		return bin
-	}
-	if path, err := exec.LookPath("instabox"); err == nil {
-		return path
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		path := filepath.Join(home, ".local", "bin", "instabox")
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-	return "instabox"
-}
-
 // run executes a command without a terminal and returns its stdout. A failure
-// carries the last line of stderr, which is where both CLIs explain themselves.
+// carries the last line of stderr, which is where herdr explains itself.
 func run(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	var stdout, stderr bytes.Buffer
@@ -154,74 +134,10 @@ func run(name string, args ...string) (string, error) {
 		} else {
 			msg = err.Error()
 		}
-		msg = strings.TrimPrefix(msg, "instabox: ")
 		msg = strings.TrimPrefix(msg, "herdr: ")
 		return stdout.String(), errors.New(msg)
 	}
 	return stdout.String(), nil
-}
-
-func instabox(args ...string) (string, error) { return run(instaboxBin(), args...) }
-
-func instaboxJSON(v any, args ...string) error {
-	out, err := instabox(append(args, "--json")...)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal([]byte(out), v); err != nil {
-		return fmt.Errorf("instabox %s: unexpected output: %w", args[0], err)
-	}
-	return nil
-}
-
-var whoamiPattern = regexp.MustCompile(`^(\S+) \(user (\d+)\) on (\S+)`)
-
-func whoami() Account {
-	out, err := instabox("whoami")
-	if err != nil {
-		if strings.Contains(err.Error(), "not logged in") {
-			return Account{SignedOut: true, Server: defaultServer()}
-		}
-		return Account{Err: err, Server: defaultServer()}
-	}
-	m := whoamiPattern.FindStringSubmatch(strings.TrimSpace(out))
-	if m == nil {
-		return Account{Err: fmt.Errorf("unexpected instabox whoami output: %s", strings.TrimSpace(out))}
-	}
-	return Account{Login: m[1], UserID: m[2], Server: m[3]}
-}
-
-func defaultServer() string {
-	for _, env := range []string{"INSTABOX_SERVER", "INSTABOX_API_URL"} {
-		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
-			return strings.TrimRight(v, "/")
-		}
-	}
-	return "https://api.box.instacloud.com"
-}
-
-func listMachines() ([]Machine, error) {
-	var machines []Machine
-	if err := instaboxJSON(&machines, "ls"); err != nil {
-		return nil, err
-	}
-	return machines, nil
-}
-
-func getMachine(id string) (Machine, error) {
-	var m Machine
-	err := instaboxJSON(&m, "get", id)
-	return m, err
-}
-
-func listTemplates() ([]Template, error) {
-	var out struct {
-		Templates []Template `json:"templates"`
-	}
-	if err := instaboxJSON(&out, "templates"); err != nil {
-		return nil, err
-	}
-	return out.Templates, nil
 }
 
 // templateFor finds the catalog entry a machine or snapshot was made from.
@@ -239,10 +155,13 @@ func templateFor(templates []Template, ref *TemplateRef) (Template, bool) {
 
 // listSnapshots returns the account's snapshots (always private), newest first.
 func listSnapshots() ([]Snapshot, error) {
-	var snapshots []Snapshot
-	if err := instaboxJSON(&snapshots, "snapshot", "ls"); err != nil {
+	var out struct {
+		Snapshots []Snapshot `json:"snapshots"`
+	}
+	if err := call(request{method: http.MethodGet, path: "/v1/snapshots", out: &out, auth: true}); err != nil {
 		return nil, err
 	}
+	snapshots := out.Snapshots
 	sort.SliceStable(snapshots, func(i, j int) bool {
 		if !snapshots[i].CreatedAt.Equal(snapshots[j].CreatedAt) {
 			return snapshots[i].CreatedAt.After(snapshots[j].CreatedAt)
@@ -250,22 +169,6 @@ func listSnapshots() ([]Snapshot, error) {
 		return snapshots[i].Name < snapshots[j].Name
 	})
 	return snapshots, nil
-}
-
-func getUsage() (Usage, error) {
-	var u Usage
-	err := instaboxJSON(&u, "usage")
-	return u, err
-}
-
-// notFound tells a deleted machine or snapshot from other failures.
-func notFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not found") || strings.Contains(s, "no such") ||
-		strings.Contains(s, "does not exist")
 }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)

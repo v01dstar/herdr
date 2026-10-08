@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +15,11 @@ import (
 // testdata/fake, with HOME and the plugin state in a temporary directory.
 
 type fakeEnv struct {
-	t    *testing.T
-	dir  string
-	home string
+	t      *testing.T
+	dir    string
+	home   string
+	api    *fakeAPI
+	server string
 }
 
 type fakeInstabox struct {
@@ -44,13 +47,19 @@ func newFake(t *testing.T, machines ...map[string]any) *fakeEnv {
 	}
 	t.Setenv("FAKE_DIR", dir)
 	t.Setenv("HOME", home)
-	t.Setenv("INSTABOX_BIN", filepath.Join(fake, "instabox"))
 	t.Setenv("HERDR_BIN_PATH", filepath.Join(fake, "herdr"))
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(dir, "state"))
 	t.Setenv("FAKE_ADD_FAILS", "")
 	t.Setenv("FAKE_ADD_DELAY", "")
 	f := &fakeEnv{t: t, dir: dir, home: home}
+	f.api, f.server = startFakeAPI(t, dir)
+	t.Setenv("INSTABOX_SERVER", f.server)
+	t.Setenv("INSTABOX_API_URL", "")
 	f.writeInstabox(fakeInstabox{SignedIn: true, Machines: machines})
+	if err := saveCredentials(&Credentials{Server: f.server, AccessToken: "at", AccessExpiresAt: time.Now().Add(time.Hour),
+		RefreshToken: "rt", RefreshExpiresAt: time.Now().Add(24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -470,9 +479,117 @@ func TestListMachinesReadsLastError(t *testing.T) {
 	}
 }
 
-func TestWhoamiParsesInstabox(t *testing.T) {
-	newFake(t)
-	if a := whoami(); a.Login != "tester" || a.UserID != "42" || a.Server != "https://instabox.test" {
+func TestWhoami(t *testing.T) {
+	f := newFake(t)
+	if a := whoami(); a.Login != "tester" || a.UserID != "42" || a.Server != f.server {
 		t.Fatalf("whoami = %+v", a)
+	}
+	_ = os.Remove(credentialsPath())
+	if a := whoami(); !a.SignedOut {
+		t.Fatalf("without credentials: %+v", a)
+	}
+}
+
+func TestExpiredAccessTokenIsRefreshedOnce(t *testing.T) {
+	f := newFake(t)
+	c, _ := loadCredentials()
+	c.AccessExpiresAt = time.Now().Add(-time.Minute)
+	_ = saveCredentials(c)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a := whoami(); !a.SignedIn() {
+				t.Errorf("whoami = %+v", a)
+			}
+		}()
+	}
+	wg.Wait()
+	if f.api.refreshes != 1 {
+		t.Fatalf("refreshed %d times, want 1 (the refresh token rotates)", f.api.refreshes)
+	}
+	if c, _ := loadCredentials(); c.AccessToken != "at-1" || c.RefreshToken != "rt-1" || c.Server != f.server {
+		t.Fatalf("rotated tokens saved: %+v", c)
+	}
+}
+
+func TestDeviceLogin(t *testing.T) {
+	f := newFake(t)
+	_ = os.Remove(credentialsPath())
+	f.api.devicePolls = 1
+	tok, err := deviceLogin(f.server)
+	if err != nil || tok.AccessToken != "at-device" {
+		t.Fatalf("deviceLogin = %+v, %v", tok, err)
+	}
+}
+
+func TestHostBlockUsesThePluginsKeyAndCertificate(t *testing.T) {
+	f := newFake(t, fakeMachine("m_a", "alpha", "running"))
+	f.sync()
+	block, err := os.ReadFile(hostFile("m_a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Match host " + TargetPrefix + "m_a exec", "ensure-cert m_a",
+		"HostName ssh.instabox.test", "Port 2222", "User m_a", "IdentityFile " + keyPath(),
+		"CertificateFile " + certPath("m_a"), "UserKnownHostsFile " + knownHostsPath(), "StrictHostKeyChecking yes"} {
+		if !strings.Contains(string(block), want) {
+			t.Errorf("host block lacks %q:\n%s", want, block)
+		}
+	}
+	kh, _ := os.ReadFile(knownHostsPath())
+	if string(kh) != "@cert-authority [ssh.instabox.test]:2222 ssh-ed25519 AAAAhostca\n" {
+		t.Fatalf("known_hosts = %q", kh)
+	}
+	if info, err := os.Stat(keyPath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key: %v %v", info, err)
+	}
+
+	// ensure-cert reuses a certificate far from expiry and renews one near it.
+	issued := f.api.certs
+	runEnsureCert("m_a", stateDir())
+	if f.api.certs != issued {
+		t.Fatal("a fresh certificate is reused")
+	}
+	var m certMeta
+	data, _ := os.ReadFile(certMetaPath("m_a"))
+	_ = json.Unmarshal(data, &m)
+	if time.Until(m.ExpiresAt) < 23*time.Hour {
+		t.Fatalf("certificates are requested for 24 hours: %v", m.ExpiresAt)
+	}
+	m.ExpiresAt = time.Now().Add(time.Minute)
+	data, _ = json.Marshal(m)
+	_ = os.WriteFile(certMetaPath("m_a"), data, 0o600)
+	runEnsureCert("m_a", stateDir())
+	if f.api.certs != issued+1 {
+		t.Fatal("a certificate near expiry is renewed")
+	}
+	if kh2, _ := os.ReadFile(knownHostsPath()); string(kh2) != string(kh) {
+		t.Fatalf("known_hosts keeps one line per gateway: %q", kh2)
+	}
+}
+
+// The browser sign-in: start page, callback, code exchange.
+func TestBrowserLogin(t *testing.T) {
+	f := newFake(t)
+	_ = os.Remove(credentialsPath())
+	var opened string
+	openBrowser = func(u string) error {
+		opened = u
+		go func() {
+			if resp, err := http.Get(u); err == nil {
+				resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+	t.Cleanup(func() { openBrowser = func(string) error { return nil } })
+	tok, err := browserLogin(f.server, "github")
+	if err != nil || tok.AccessToken != "at-browser" {
+		t.Fatalf("browserLogin = %+v, %v", tok, err)
+	}
+	if !strings.HasPrefix(opened, f.server+"/auth/cli/start?") {
+		t.Fatalf("the browser opens the server's sign-in page, got %q", opened)
 	}
 }

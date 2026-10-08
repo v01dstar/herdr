@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -89,11 +88,11 @@ func removeInclude() error {
 	return os.WriteFile(path, []byte(text), 0o600)
 }
 
-// writeHostBlock asks instabox for the machine's Host block (which also issues a
-// certificate), renames the host to the managed alias and saves it. A Match exec
-// line in front refreshes the short-lived certificate before every connection.
+// writeHostBlock writes the machine's Host block, issuing a certificate for
+// the plugin's own SSH key. A Match exec line in front renews the certificate
+// before a connection when it is close to expiry.
 func writeHostBlock(m Machine) error {
-	out, err := instabox("ssh-config", m.ID)
+	cm, err := ensureCert(m.ID, true)
 	if err != nil {
 		return err
 	}
@@ -101,24 +100,19 @@ func writeHostBlock(m Machine) error {
 	if err != nil {
 		return err
 	}
+	port := cm.Port
+	if port == 0 {
+		port = 22
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# instabox machine %s (%s), managed by herdr-instabox\n", m.Name, m.ID)
 	fmt.Fprintf(&b, "Match host %s exec \"%s ensure-cert %s %s\"\n",
-		m.Target(), shellQuote(self), m.ID, shellQuote(instaboxBin()))
-	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "" || strings.HasPrefix(trimmed, "#"):
-		case strings.HasPrefix(trimmed, "Host "):
-			fmt.Fprintf(&b, "Host %s\n", m.Target())
-		default:
-			b.WriteString(line + "\n")
-		}
-	}
-	if err := os.MkdirAll(hostsDir(), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(hostFile(m.ID), []byte(b.String()), 0o600)
+		m.Target(), shellQuote(self), m.ID, shellQuote(stateDir()))
+	fmt.Fprintf(&b, "Host %s\n", m.Target())
+	fmt.Fprintf(&b, "  HostName %s\n  Port %d\n  User %s\n", cm.Host, port, cm.Username)
+	fmt.Fprintf(&b, "  IdentityFile %s\n  CertificateFile %s\n  IdentitiesOnly yes\n", keyPath(), certPath(m.ID))
+	fmt.Fprintf(&b, "  UserKnownHostsFile %s\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n", knownHostsPath())
+	return writeFileAtomic(hostFile(m.ID), []byte(b.String()), 0o600)
 }
 
 func hasHostBlock(id string) bool {
@@ -134,43 +128,13 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ensureCert runs from ssh's Match exec before each connection. It refreshes the
-// certificate only near expiry and always succeeds: a failed refresh surfaces as
-// an SSH authentication error, which herdr already reports.
-func ensureCert(id, instaboxPath string) {
-	cert := filepath.Join(instaboxConfigDir(), "ssh", id+"-cert.pub")
-	if until, ok := certValidUntil(cert); ok && time.Until(until) > certMargin {
-		return
+// runEnsureCert is `herdr-instabox ensure-cert ID STATEDIR`, which ssh runs
+// (Match exec) before each connection. It renews the certificate only near
+// expiry and always succeeds: a failed renewal surfaces as an SSH
+// authentication error, which herdr already reports.
+func runEnsureCert(id, dir string) {
+	if dir != "" {
+		_ = os.Setenv("HERDR_PLUGIN_STATE_DIR", dir)
 	}
-	cmd := exec.Command(instaboxPath, "ssh-cert", id)
-	_ = cmd.Run()
-}
-
-// instaboxConfigDir is where the instabox CLI keeps its sign-in and certificates.
-func instaboxConfigDir() string {
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "instabox")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "instabox")
-}
-
-func certValidUntil(path string) (time.Time, bool) {
-	out, err := exec.Command("ssh-keygen", "-L", "-f", path).Output()
-	if err != nil {
-		return time.Time{}, false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		_, rest, ok := strings.Cut(strings.TrimSpace(line), "Valid: from ")
-		if !ok {
-			continue
-		}
-		_, to, ok := strings.Cut(rest, " to ")
-		if !ok {
-			return time.Time{}, false
-		}
-		until, err := time.ParseInLocation("2006-01-02T15:04:05", strings.TrimSpace(to), time.Local)
-		return until, err == nil
-	}
-	return time.Time{}, false
+	_, _ = ensureCert(id, false)
 }
