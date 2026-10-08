@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// Reconciliation keeps herdr's saved machines in line with hangar: every machine
+// Reconciliation keeps herdr's saved machines in line with instabox: every machine
 // that is running, not hidden and not fenced is in herdr and enabled; other
 // machines are disabled (still listed in the sidebar) or, when hidden or
-// deleted, removed. Signed out, every local trace of hangar is removed. hangar
+// deleted, removed. Signed out, every local trace of instabox is removed. instabox
 // machines themselves are never changed here.
 
 const (
@@ -129,7 +129,7 @@ func reconcile(machines []Machine) error {
 		for id := range s.Fence {
 			ids = append(ids, id)
 		}
-		if id, ok := strings.CutPrefix(s.Default, "hangar:"); ok {
+		if id, ok := strings.CutPrefix(s.Default, "instabox:"); ok {
 			ids = append(ids, id)
 		}
 		for _, id := range ids {
@@ -174,7 +174,7 @@ func reconcileOne(m Machine, p Profile, has bool, st State) error {
 		}
 	}
 	if m.State != "running" && st.fenced(m.ID) {
-		// The fence has done its job once hangar no longer reports it running.
+		// The fence has done its job once instabox no longer reports it running.
 		_ = updateState(func(s *State) { delete(s.Fence, m.ID) })
 	}
 	return nil
@@ -332,5 +332,5 @@ func withInclude(status string) (string, error) {
 	if status == "" {
 		return "", nil
 	}
-	return status + " ~/.ssh/config now includes the hangar hosts.", nil
+	return status + " ~/.ssh/config now includes the instabox hosts.", nil
 }

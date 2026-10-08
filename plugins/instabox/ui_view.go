@@ -93,7 +93,7 @@ func (m model) View() string {
 		return ""
 	}
 	if m.w < 60 || m.h < 18 {
-		return "Make this pane larger (at least 60×18) for hangar settings."
+		return "Make this pane larger (at least 60×18) for instabox settings."
 	}
 	h := m.hit
 	h.reset()
@@ -129,8 +129,8 @@ func (m model) View() string {
 	switch m.tab {
 	case tabRemotes:
 		m.renderRemotes(c, top, bottom)
-	case tabImages:
-		m.renderImages(c, top, bottom)
+	case tabSnapshots:
+		m.renderSnapshots(c, top, bottom)
 	default:
 		m.renderAccount(c, top, bottom)
 	}
@@ -223,13 +223,13 @@ func (m model) renderRemotes(c *canvas, top, bottom int) {
 			} else {
 				right = sDim.Render("disabled")
 			}
-		case rowHangar:
+		case rowInstabox:
 			name = "⇄ " + m.st.label(r.machine)
 			word, kind := m.stateWord(r)
 			right = colour(kind).Render(word)
 		}
 		var notes []string
-		if r.kind == rowHangar && m.st.Hidden[r.machine.ID] {
+		if r.kind == rowInstabox && m.st.Hidden[r.machine.ID] {
 			notes = append(notes, "hidden")
 		}
 		if r.kind != rowAdd && m.isDefault(r) && (r.kind != rowLocal || m.st.Default == "" || !m.defaultValid()) {
@@ -306,13 +306,13 @@ func (m model) renderDetail(out []string, top, w int, header string, info []stri
 	}
 }
 
-func (m model) renderImages(c *canvas, top, bottom int) {
+func (m model) renderSnapshots(c *canvas, top, bottom int) {
 	lw := m.listWidth()
 	m.hit.listX1 = lw
 	height := bottom - top + 1
 	left := make([]string, height)
 	right := make([]string, height)
-	if listNote, detail := m.imagesPlaceholder(); detail != "" {
+	if listNote, detail := m.snapshotsPlaceholder(); detail != "" {
 		left[0] = " " + sDim.Render(listNote)
 		for i, l := range wrap(detail, m.w-lw-3) {
 			if i < height {
@@ -324,8 +324,8 @@ func (m model) renderImages(c *canvas, top, bottom int) {
 		if m.img >= height {
 			first = m.img - height + 1
 		}
-		for i := first; i < len(m.images) && i-first < height; i++ {
-			im := m.images[i]
+		for i := first; i < len(m.snapshots) && i-first < height; i++ {
+			im := m.snapshots[i]
 			marker := "  "
 			if i == m.img {
 				marker = "▸ "
@@ -341,8 +341,8 @@ func (m model) renderImages(c *canvas, top, bottom int) {
 			left[i-first] = line
 			m.hit.rows[top+i-first] = i
 		}
-		header, info := m.imageDetail(m.images[m.img])
-		m.renderDetail(right, top, m.w-lw-1, header, info, m.imageActions(), m.imgAc, m.focus == 1)
+		header, info := m.snapshotDetail(m.snapshots[m.img])
+		m.renderDetail(right, top, m.w-lw-1, header, info, m.snapshotActions(), m.imgAc, m.focus == 1)
 	}
 	for i := 0; i < height; i++ {
 		c.set(top+i, fit(left[i], lw)+sDim.Render("│")+right[i])
@@ -376,7 +376,7 @@ func (m model) renderAccount(c *canvas, top, bottom int) {
 			y++
 		}
 	}
-	ssh := "SSH config: ~/.ssh/config includes the hangar hosts."
+	ssh := "SSH config: ~/.ssh/config includes the instabox hosts."
 	if !sshIncluded() {
 		ssh = "SSH config: signing in adds one Include line to ~/.ssh/config; signing out removes it."
 	}
@@ -484,14 +484,14 @@ func (m model) shiftHits(line, y, x int) {
 
 func (m model) primaryDisabled() bool {
 	f := m.dialog.form
-	return f != nil && (f.kind == formClone || f.kind == formImage) && (f.plan == "" || f.plan == "none")
+	return f != nil && (f.kind == formClone || f.kind == formSnapshot) && (f.plan == "" || f.plan == "none")
 }
 
 func (m model) chooserBody(ch *chooser, inner int) (string, []string, []button) {
 	colW := (inner - 3) / 2
 	opts := [2][3]string{
 		{"Clone now", "a second machine", "exactly like this one"},
-		{"Save as image", "a starting point for", "new machines"},
+		{"Save as snapshot", "a starting point for", "new machines"},
 	}
 	var body []string
 	body = append(body, "")
@@ -517,12 +517,12 @@ func (m model) chooserBody(ch *chooser, inner int) (string, []string, []button) 
 	}
 	body = append(body, lines[0], lines[1], lines[2], "")
 	table := [][3]string{
-		{"", "Clone", "Image"},
+		{"", "Clone", "Snapshot"},
 		{"Installed software", "✓", "✓"},
 		{"System settings", "✓", "✓"},
 		{"Repos & home files", "✓", "✗"},
 		{"Logins (gh, claude)", "✓", "✗"},
-		{"Result", "new machine", "reusable image"},
+		{"Result", "new machine", "reusable snapshot"},
 	}
 	for i, r := range table {
 		line := fit("  "+r[0], 24) + fit(r[1], 14) + r[2]
@@ -598,7 +598,7 @@ func (m model) formBody(f *form, inner int) (string, []string, []button) {
 		primary = "sign in"
 	}
 	cancel := " esc cancel "
-	if f.kind == formClone || f.kind == formImage {
+	if f.kind == formClone || f.kind == formSnapshot {
 		cancel = " esc back "
 	}
 	return f.title, body, []button{{id: " ↵ " + primary + " "}, {id: cancel}}
@@ -679,9 +679,9 @@ func (m model) mouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case tabRemotes:
 			m.focus, m.act = 1, i
 			return m.runRemoteAction()
-		case tabImages:
+		case tabSnapshots:
 			m.focus, m.imgAc = 1, i
-			return m.runImageAction()
+			return m.runSnapshotAction()
 		default:
 			m.accAc = i
 			return m.runAccountAction()

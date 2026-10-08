@@ -12,7 +12,7 @@ type rowKind int
 
 const (
 	rowLocal rowKind = iota
-	rowHangar
+	rowInstabox
 	rowSSH
 	rowAdd
 )
@@ -39,12 +39,12 @@ const (
 	aShow
 	aCopy
 	aDelete
-	aNewFromImage
-	aDeleteImage
+	aNewFromSnapshot
+	aDeleteSnapshot
 	aSignIn
 	aSwitch
 	aSignOut
-	aSignUp
+	aSignInGoogle
 )
 
 type action struct {
@@ -54,7 +54,7 @@ type action struct {
 	reason string // set when the action applies but is blocked now
 }
 
-// rows lists Local, hangar machines by name, the user's own SSH remotes and the
+// rows lists Local, instabox machines by name, the user's own SSH remotes and the
 // Add row, like herdr's remotes settings.
 func (m model) rows() []row {
 	managed, ssh := splitProfiles(m.profiles)
@@ -68,7 +68,7 @@ func (m model) rows() []row {
 		return machines[i].ID < machines[j].ID
 	})
 	for _, mc := range machines {
-		r := row{kind: rowHangar, machine: mc}
+		r := row{kind: rowInstabox, machine: mc}
 		if p, ok := managed[mc.ID]; ok {
 			r.profile = &p
 		}
@@ -82,8 +82,8 @@ func (m model) rows() []row {
 
 func (r row) key() string {
 	switch r.kind {
-	case rowHangar:
-		return "hangar:" + r.machine.ID
+	case rowInstabox:
+		return "instabox:" + r.machine.ID
 	case rowSSH:
 		return "ssh:" + r.profile.ID
 	case rowAdd:
@@ -104,8 +104,8 @@ func (m model) isDefault(r row) bool {
 	switch r.kind {
 	case rowLocal:
 		return m.st.Default == "" || !m.defaultValid()
-	case rowHangar:
-		return m.st.Default == "hangar:"+r.machine.ID
+	case rowInstabox:
+		return m.st.Default == "instabox:"+r.machine.ID
 	case rowSSH:
 		return m.st.Default == "ssh:"+r.profile.ID
 	}
@@ -155,20 +155,20 @@ func (m model) remoteActions() []action {
 			{kind: aStartSession, label: "Start session"},
 			{kind: aRemoveRemote, label: "Remove remote", group: 1},
 		}
-	case rowHangar:
-		return m.hangarActions(r, defaultReason)
+	case rowInstabox:
+		return m.instaboxActions(r, defaultReason)
 	}
 	return nil
 }
 
-func (m model) hangarActions(r row, defaultReason string) []action {
+func (m model) instaboxActions(r row, defaultReason string) []action {
 	mc := r.machine
 	server := func(reason string) string {
 		switch {
 		case m.note == "signed out":
 			return "Sign in on the account tab first"
 		case m.note != "":
-			return "hangar is unreachable; showing the last synced state"
+			return "instabox is unreachable; showing the last synced state"
 		case m.busyOn(mc.ID) != nil:
 			return "Wait for the current operation on this machine to finish"
 		}
@@ -251,8 +251,8 @@ func (m model) runRemoteAction() (tea.Model, tea.Cmd) {
 	case aDefault:
 		value, where := "", "this computer"
 		switch r.kind {
-		case rowHangar:
-			value, where = "hangar:"+mc.ID, label+stateSuffix(mc.State)
+		case rowInstabox:
+			value, where = "instabox:"+mc.ID, label+stateSuffix(mc.State)
 		case rowSSH:
 			value, where = "ssh:"+r.profile.ID, r.profile.Label
 		}
@@ -308,17 +308,17 @@ func (m model) runRemoteAction() (tea.Model, tea.Cmd) {
 		return m.launch(Job{Kind: jobResume, MachineID: mc.ID, MachineName: label})
 	case aSuspend:
 		m.dialog = confirmDialog("suspend machine", "suspend", fmt.Sprintf(
-			"Suspend hangar machine %s? Its memory is saved to a snapshot, so running programs and Herdr sessions continue after Resume. (Stop… shuts everything down instead; only files on disk remain.) It does not reconnect until it is resumed.", label),
+			"Suspend instabox machine %s? Its memory is saved to a snapshot, so running programs and Herdr sessions continue after Resume. (Stop… shuts everything down instead; only files on disk remain.) It does not reconnect until it is resumed.", label),
 			Job{Kind: jobSuspend, MachineID: mc.ID, MachineName: label})
 		return m, nil
 	case aStop:
 		m.dialog = confirmDialog("stop machine", "stop", fmt.Sprintf(
-			"Stop hangar machine %s? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend… keeps them). It does not reconnect until it is started again.", label),
+			"Stop instabox machine %s? All sessions and jobs on this machine stop. Files on its persistent disk remain; running processes do not survive (Suspend… keeps them). It does not reconnect until it is started again.", label),
 			Job{Kind: jobStop, MachineID: mc.ID, MachineName: label})
 		return m, nil
 	case aDelete:
 		m.dialog = confirmDialog("delete machine", "delete", fmt.Sprintf(
-			"Delete hangar machine '%s'? The machine, its disks and snapshots are permanently deleted, with every file and process on it. This cannot be undone. Herdr closes its workspaces and stops listing it.", label),
+			"Delete instabox machine '%s'? The machine, its disks and snapshots are permanently deleted, with every file and process on it. This cannot be undone. Herdr closes its workspaces and stops listing it.", label),
 			Job{Kind: jobDelete, MachineID: mc.ID, MachineName: label})
 		return m, nil
 
@@ -375,7 +375,7 @@ func stateSuffix(state string) string {
 	return " (" + state + ")"
 }
 
-// stateWord is the coloured state shown on a hangar row.
+// stateWord is the coloured state shown on an instabox row.
 func (m model) stateWord(r row) (string, string) {
 	mc := r.machine
 	switch {
@@ -405,7 +405,7 @@ func (m model) detailLines(r row) (string, []string) {
 		}
 		return "Local · this computer", lines
 	case rowAdd:
-		return "Add remote", []string{"Create a hangar machine, from the herdr template or one of your images, or add an SSH remote. Press ↵ or click to start."}
+		return "Add remote", []string{"Create an instabox machine, from the herdr template or one of your snapshots, or add an SSH remote. Press ↵ or click to start."}
 	case rowSSH:
 		p := r.profile
 		state := "disabled"
@@ -434,14 +434,14 @@ func (m model) detailLines(r row) (string, []string) {
 		parts = append(parts, fmt.Sprintf("%d GiB root", mc.Spec.RootDiskGiB))
 	}
 	parts = append(parts, fmt.Sprintf("%d GiB /data", mc.Spec.PersistentDiskGiB))
-	if mc.Image != nil {
-		parts = append(parts, "from image "+m.imageName(mc.Image.ID))
+	if mc.Snapshot != nil {
+		parts = append(parts, "from snapshot "+m.snapshotName(mc.Snapshot.ID))
 	}
 	if m.note != "" {
 		parts = append(parts, m.note+": last synced state")
 	}
-	if (mc.State == "error" || mc.State == "failed") && mc.LastError != "" {
-		parts = append(parts, "last error: "+mc.LastError)
+	if (mc.State == "error" || mc.State == "failed") && mc.LastError != nil && mc.LastError.Message != "" {
+		parts = append(parts, "last error: "+mc.LastError.Message)
 	}
 	lines := []string{strings.Join(parts, " · ")}
 	if m.st.Hidden[mc.ID] {
@@ -450,14 +450,21 @@ func (m model) detailLines(r row) (string, []string) {
 	if j := m.busyOn(mc.ID); j != nil && j.Progress != "" {
 		lines = append(lines, j.Progress)
 	}
-	return m.st.label(mc) + " · hangar · " + state, lines
+	return m.st.label(mc) + " · instabox · " + state, lines
 }
 
-func (m model) imageName(id string) string {
-	for _, im := range m.images {
+func (m model) snapshotByID(id string) (Snapshot, bool) {
+	for _, im := range m.snapshots {
 		if im.ID == id {
-			return im.Name
+			return im, true
 		}
+	}
+	return Snapshot{}, false
+}
+
+func (m model) snapshotName(id string) string {
+	if im, ok := m.snapshotByID(id); ok {
+		return im.Name
 	}
 	return id
 }

@@ -9,9 +9,9 @@ import (
 
 // TargetPrefix marks the herdr SSH machines this plugin manages. Profiles with
 // any other target are the user's own SSH remotes.
-const TargetPrefix = "herdr-hangar-"
+const TargetPrefix = "herdr-instabox-"
 
-// RemoteSession is the herdr session hangar machines run.
+// RemoteSession is the herdr session instabox machines run.
 const RemoteSession = "herdr-remote"
 
 // Profile is one saved herdr SSH machine (`herdr machine list --json`).
@@ -25,7 +25,7 @@ type Profile struct {
 	Selected bool `json:"selected"`
 }
 
-// MachineID is the hangar machine a managed profile stands for.
+// MachineID is the instabox machine a managed profile stands for.
 func (p Profile) MachineID() (string, bool) { return strings.CutPrefix(p.Target, TargetPrefix) }
 
 func herdrBin() string {
@@ -49,7 +49,7 @@ func listProfiles() ([]Profile, error) {
 	return all, nil
 }
 
-// splitProfiles separates managed hangar profiles (by machine ID) from the
+// splitProfiles separates managed instabox profiles (by machine ID) from the
 // user's own SSH remotes.
 func splitProfiles(all []Profile) (managed map[string]Profile, ssh []Profile) {
 	managed = map[string]Profile{}

@@ -12,17 +12,17 @@ import (
 // are separate processes, so every change goes through updateState under a lock.
 type State struct {
 	// LastAccount is the account seen most recently, so a sign-out made with
-	// the hangar CLI can still be cleaned up.
+	// the instabox CLI can still be cleaned up.
 	LastAccount string `json:"lastAccount,omitempty"`
-	// Default is where New workspace opens: "" for Local, "hangar:<machine id>"
+	// Default is where New workspace opens: "" for Local, "instabox:<machine id>"
 	// or "ssh:<profile id>".
 	Default string `json:"default,omitempty"`
 	// Hidden machines stay listed here but are not in herdr's sidebar.
 	Hidden map[string]bool `json:"hidden,omitempty"`
-	// Labels are herdr-only names that override the hangar name.
+	// Labels are herdr-only names that override the instabox name.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Fence keeps a machine disconnected while it stops, suspends or is
-	// deleted, until hangar no longer reports it running.
+	// deleted, until instabox no longer reports it running.
 	Fence map[string]time.Time `json:"fence,omitempty"`
 	// RetryAdd delays the next automatic `herdr machine add` after a failure.
 	RetryAdd map[string]time.Time `json:"retryAdd,omitempty"`
@@ -37,7 +37,7 @@ func stateDir() string {
 		return dir
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "herdr-hangar")
+	return filepath.Join(home, ".local", "state", "herdr-instabox")
 }
 
 func statePath() string { return filepath.Join(stateDir(), "state.json") }
@@ -123,7 +123,7 @@ func (s *State) forget(id string) {
 	delete(s.Fence, id)
 	delete(s.RetryAdd, id)
 	delete(s.AddError, id)
-	if s.Default == "hangar:"+id {
+	if s.Default == "instabox:"+id {
 		s.Default = ""
 	}
 }

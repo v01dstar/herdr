@@ -2,13 +2,12 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const accountNote = "Herdr and the hangar CLI share this sign-in (~/.config/hangar/credentials.json). Sign in opens your browser; over SSH or without a browser it shows a code to enter instead."
+const accountNote = "Herdr and the instabox CLI share this sign-in (~/.config/instabox/credentials.json). Sign in opens your browser; over SSH or without a browser it shows a code to enter instead (GitHub only)."
 
 func (m model) accountActions() []action {
 	if m.acct.SignedIn() || (m.acct.Err != nil && !m.acct.SignedOut) {
@@ -18,19 +17,19 @@ func (m model) accountActions() []action {
 		}
 	}
 	return []action{
-		{kind: aSignIn, label: "Sign in"},
-		{kind: aSignUp, label: "Sign up with invite code…"},
+		{kind: aSignIn, label: "Sign in with GitHub"},
+		{kind: aSignInGoogle, label: "Sign in with Google"},
 	}
 }
 
 func (m model) accountSummary() string {
 	switch {
 	case !m.checked:
-		return "Checking your hangar sign-in…"
+		return "Checking your instabox sign-in…"
 	case m.acct.SignedIn():
 		return fmt.Sprintf("Signed in as @%s on %s.", m.acct.Login, m.acct.Server)
 	case m.acct.SignedOut:
-		return fmt.Sprintf("Not signed in to hangar (%s).", m.acct.Server)
+		return fmt.Sprintf("Not signed in to instabox (%s).", m.acct.Server)
 	}
 	return fmt.Sprintf("Signed in on %s, but the account could not be checked: %v", m.acct.Server, m.acct.Err)
 }
@@ -52,7 +51,7 @@ func (m model) usageLines() []string {
 	lines := []string{
 		"Storage   " + storage,
 		fmt.Sprintf("Machines  %d of %d", u.Machines, u.Limits.MaxMachines),
-		fmt.Sprintf("Images    %d of %d", u.Images, u.Limits.MaxImages),
+		fmt.Sprintf("Snapshots    %d of %d", u.Snapshots, u.Limits.MaxSnapshots),
 	}
 	if u.ComputedAt != nil {
 		lines = append(lines, "Measured "+u.ComputedAt.UTC().Format("2006-01-02 15:04")+" UTC (usage is measured hourly)")
@@ -69,29 +68,28 @@ func (m model) runAccountAction() (tea.Model, tea.Cmd) {
 	}
 	switch acts[m.accAc].kind {
 	case aSignIn, aSwitch:
-		return m.signIn("")
-	case aSignUp:
-		m.dialog = signUpDialog()
-		return m, nil
+		return m.signIn("github")
+	case aSignInGoogle:
+		return m.signIn("google")
 	case aSignOut:
 		server := m.acct.Server
 		m.dialog = &dialog{confirm: &confirm{
-			title: "sign out of hangar",
+			title: "sign out of instabox",
 			verb:  "sign out",
-			body:  fmt.Sprintf("Sign out of hangar on %s? This revokes the sign-in on the server and removes ~/.config/hangar/credentials.json, which the hangar CLI shares, so `hangar` commands are signed out too. Herdr forgets the hangar machines and removes their SSH config; the machines keep running, and signing in again brings them back.", server),
+			body:  fmt.Sprintf("Sign out of instabox on %s? This revokes the sign-in on the server and removes ~/.config/instabox/credentials.json, which the instabox CLI shares, so `instabox` commands are signed out too. Herdr forgets the instabox machines and removes their SSH config; the machines keep running, and signing in again brings them back.", server),
 			run: func(m *model) tea.Cmd {
 				m.say(msgInfo, "Signing out…")
 				return quick(true, func() (string, error) {
 					// Clean up while still signed in, then sign out even if
 					// part of it failed; the next sync retries the rest.
 					cleanErr := cleanupLocal()
-					if _, err := hangar("logout"); err != nil {
+					if _, err := instabox("logout"); err != nil {
 						return "", err
 					}
 					if cleanErr != nil {
-						return "", fmt.Errorf("Signed out of hangar on %s, but: %w", server, cleanErr)
+						return "", fmt.Errorf("Signed out of instabox on %s, but: %w", server, cleanErr)
 					}
-					return fmt.Sprintf("Signed out of hangar on %s. The hangar CLI is signed out too.", server), nil
+					return fmt.Sprintf("Signed out of instabox on %s. The instabox CLI is signed out too.", server), nil
 				})
 			},
 		}}
@@ -100,26 +98,23 @@ func (m model) runAccountAction() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// signIn hands the terminal to `hangar login`, which opens the browser or shows
+// signIn hands the terminal to `instabox login`, which opens the browser or shows
 // a device code. Switching accounts first clears the old account's machines.
-func (m model) signIn(invite string) (tea.Model, tea.Cmd) {
+func (m model) signIn(provider string) (tea.Model, tea.Cmd) {
 	if m.acct.SignedIn() {
 		if err := cleanupLocal(); err != nil {
 			m.say(msgErr, "%v", err)
 			return m, nil
 		}
 	}
-	args := []string{"login"}
-	if invite != "" {
-		args = append(args, "--invite", invite)
-	}
+	args := []string{"login", "--provider", provider}
 	m.say(msgInfo, "Starting sign-in…")
-	return m, interactive(hangarBin(), args, func() (string, error) {
+	return m, interactive(instaboxBin(), args, func() (string, error) {
 		acct := whoami()
 		if !acct.SignedIn() {
 			return "", fmt.Errorf("sign-in did not complete")
 		}
-		text, err := withInclude("Signed in to hangar as @" + acct.Login + ".")
+		text, err := withInclude("Signed in to instabox as @" + acct.Login + ".")
 		if err != nil {
 			return "", err
 		}
@@ -127,22 +122,4 @@ func (m model) signIn(invite string) (tea.Model, tea.Cmd) {
 		_ = updateState(func(s *State) { s.LastSync = time.Time{} })
 		return text, nil
 	})
-}
-
-func signUpDialog() *dialog {
-	f := newForm(formSignUp, "sign up for hangar", "sign up")
-	f.text = "hangar is invite-only. Enter the invite code you received, then approve with GitHub in your browser. Your GitHub account becomes your hangar account."
-	f.addText("Invite code", "", "hgi_…")
-	return &dialog{form: f}
-}
-
-func validateInvite(code string) (string, string) {
-	code = strings.TrimSpace(code)
-	switch {
-	case code == "":
-		return "", "Enter the invite code you received."
-	case !invitePattern.MatchString(code):
-		return "", "That doesn't look like an invite code: they start with hgi_ followed by 20 letters and digits."
-	}
-	return code, ""
 }

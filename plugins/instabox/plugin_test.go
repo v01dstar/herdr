@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// These tests drive the real code against the fake hangar and herdr CLIs in
+// These tests drive the real code against the fake instabox and herdr CLIs in
 // testdata/fake, with HOME and the plugin state in a temporary directory.
 
 type fakeEnv struct {
@@ -19,10 +19,10 @@ type fakeEnv struct {
 	home string
 }
 
-type fakeHangar struct {
-	SignedIn bool             `json:"signedIn"`
-	Machines []map[string]any `json:"machines"`
-	Images   []map[string]any `json:"images"`
+type fakeInstabox struct {
+	SignedIn  bool             `json:"signedIn"`
+	Machines  []map[string]any `json:"machines"`
+	Snapshots []map[string]any `json:"snapshots"`
 }
 
 type fakeHerdr struct {
@@ -44,13 +44,13 @@ func newFake(t *testing.T, machines ...map[string]any) *fakeEnv {
 	}
 	t.Setenv("FAKE_DIR", dir)
 	t.Setenv("HOME", home)
-	t.Setenv("HANGAR_BIN", filepath.Join(fake, "hangar"))
+	t.Setenv("INSTABOX_BIN", filepath.Join(fake, "instabox"))
 	t.Setenv("HERDR_BIN_PATH", filepath.Join(fake, "herdr"))
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(dir, "state"))
 	t.Setenv("FAKE_ADD_FAILS", "")
 	t.Setenv("FAKE_ADD_DELAY", "")
 	f := &fakeEnv{t: t, dir: dir, home: home}
-	f.writeHangar(fakeHangar{SignedIn: true, Machines: machines})
+	f.writeInstabox(fakeInstabox{SignedIn: true, Machines: machines})
 	return f
 }
 
@@ -85,13 +85,13 @@ func (f *fakeEnv) writeJSON(name string, v any) {
 	}
 }
 
-func (f *fakeEnv) hangar() fakeHangar {
-	var h fakeHangar
-	f.readJSON("hangar.json", &h)
+func (f *fakeEnv) instabox() fakeInstabox {
+	var h fakeInstabox
+	f.readJSON("instabox.json", &h)
 	return h
 }
 
-func (f *fakeEnv) writeHangar(h fakeHangar) { f.writeJSON("hangar.json", h) }
+func (f *fakeEnv) writeInstabox(h fakeInstabox) { f.writeJSON("instabox.json", h) }
 
 func (f *fakeEnv) herdr() fakeHerdr {
 	var h fakeHerdr
@@ -100,13 +100,13 @@ func (f *fakeEnv) herdr() fakeHerdr {
 }
 
 func (f *fakeEnv) setState(id, state string) {
-	h := f.hangar()
+	h := f.instabox()
 	for _, m := range h.Machines {
 		if m["id"] == id {
 			m["state"] = state
 		}
 	}
-	f.writeHangar(h)
+	f.writeInstabox(h)
 }
 
 func (f *fakeEnv) profile(machineID string) (Profile, bool) {
@@ -159,7 +159,7 @@ func TestSyncFollowsMachineState(t *testing.T) {
 func TestSyncHiddenRenamedAndDeleted(t *testing.T) {
 	f := newFake(t, fakeMachine("m_a", "alpha", "running"))
 	f.sync()
-	_ = updateState(func(s *State) { s.Hidden["m_a"] = true; s.Default = "hangar:m_a" })
+	_ = updateState(func(s *State) { s.Hidden["m_a"] = true; s.Default = "instabox:m_a" })
 	f.sync()
 	if _, ok := f.profile("m_a"); ok {
 		t.Fatal("a hidden machine leaves the sidebar")
@@ -170,7 +170,7 @@ func TestSyncHiddenRenamedAndDeleted(t *testing.T) {
 		t.Fatalf("shown again under its herdr name: %+v", p)
 	}
 
-	f.writeHangar(fakeHangar{SignedIn: true})
+	f.writeInstabox(fakeInstabox{SignedIn: true})
 	f.sync()
 	if _, ok := f.profile("m_a"); ok || hasHostBlock("m_a") {
 		t.Fatal("a deleted machine is forgotten")
@@ -190,12 +190,12 @@ func TestSignOutRemovesLocalTracesOnly(t *testing.T) {
 	f.sync()
 	_ = updateState(func(s *State) { s.Labels["m_a"] = "box" })
 
-	hg := f.hangar()
+	hg := f.instabox()
 	hg.SignedIn = false
-	f.writeHangar(hg)
+	f.writeInstabox(hg)
 	f.sync()
 	if _, ok := f.profile("m_a"); ok {
-		t.Fatal("signed out, hangar machines leave herdr")
+		t.Fatal("signed out, instabox machines leave herdr")
 	}
 	if got := f.sshConfig(); got != userConfig {
 		t.Fatalf("~/.ssh/config is restored exactly, got %q", got)
@@ -203,12 +203,12 @@ func TestSignOutRemovesLocalTracesOnly(t *testing.T) {
 	if entries, _ := os.ReadDir(hostsDir()); len(entries) != 0 {
 		t.Fatal("Host blocks are removed")
 	}
-	if len(f.herdr().Profiles) != 1 || len(f.hangar().Machines) != 1 {
-		t.Fatal("the user's own SSH remote and the hangar machine itself stay")
+	if len(f.herdr().Profiles) != 1 || len(f.instabox().Machines) != 1 {
+		t.Fatal("the user's own SSH remote and the instabox machine itself stay")
 	}
 
 	hg.SignedIn = true
-	f.writeHangar(hg)
+	f.writeInstabox(hg)
 	f.sync()
 	if p, ok := f.profile("m_a"); !ok || p.Label != "box" {
 		t.Fatalf("signing in brings the machine back with its name: %+v", p)
@@ -282,7 +282,7 @@ func TestLifecycleJobs(t *testing.T) {
 	}
 
 	runTestJob(t, Job{Kind: jobDelete, MachineID: "m_a", MachineName: "alpha"})
-	if _, ok := f.profile("m_a"); ok || len(f.hangar().Machines) != 0 {
+	if _, ok := f.profile("m_a"); ok || len(f.instabox().Machines) != 0 {
 		t.Fatal("delete removes the machine everywhere")
 	}
 	if out := runTestJob(t, Job{Kind: jobDelete, MachineID: "m_a", MachineName: "alpha"}); !strings.Contains(out, "already deleted") {
@@ -290,10 +290,10 @@ func TestLifecycleJobs(t *testing.T) {
 	}
 }
 
-func TestCreateCloneAndImages(t *testing.T) {
+func TestCreateCloneAndSnapshots(t *testing.T) {
 	f := newFake(t)
 	runTestJob(t, Job{Kind: jobCreate, Name: "fresh", MachineName: "fresh"})
-	h := f.hangar()
+	h := f.instabox()
 	if len(h.Machines) != 1 {
 		t.Fatal("create makes a machine")
 	}
@@ -306,19 +306,19 @@ func TestCreateCloneAndImages(t *testing.T) {
 	if !strings.Contains(out, "stays stopped") {
 		t.Fatalf("cloning a running machine stops it first: %q", out)
 	}
-	if len(f.hangar().Machines) != 2 {
+	if len(f.instabox().Machines) != 2 {
 		t.Fatal("clone makes a second machine")
 	}
 
-	runTestJob(t, Job{Kind: jobSaveImage, MachineID: id, MachineName: "fresh", Name: "base"})
-	images, err := listImages()
-	if err != nil || len(images) != 1 || images[0].Name != "base" {
-		t.Fatalf("image saved: %+v %v", images, err)
+	runTestJob(t, Job{Kind: jobSaveSnapshot, MachineID: id, MachineName: "fresh", Name: "base"})
+	snapshots, err := listSnapshots()
+	if err != nil || len(snapshots) != 1 || snapshots[0].Name != "base" {
+		t.Fatalf("snapshot saved: %+v %v", snapshots, err)
 	}
-	runTestJob(t, Job{Kind: jobCreate, Name: "from-base", Image: images[0].ID, ImageName: "base", MachineName: "from-base"})
-	runTestJob(t, Job{Kind: jobDeleteImage, Image: images[0].ID, ImageName: "base"})
-	if images, _ := listImages(); len(images) != 0 {
-		t.Fatal("image deleted")
+	runTestJob(t, Job{Kind: jobCreate, Name: "from-base", Snapshot: snapshots[0].ID, SnapshotName: "base", MachineName: "from-base"})
+	runTestJob(t, Job{Kind: jobDeleteSnapshot, Snapshot: snapshots[0].ID, SnapshotName: "base"})
+	if snapshots, _ := listSnapshots(); len(snapshots) != 0 {
+		t.Fatal("snapshot deleted")
 	}
 }
 
@@ -328,9 +328,9 @@ func TestNewWorkspaceUsesTheDefault(t *testing.T) {
 	if err := newWorkspace(); err != nil {
 		t.Fatal(err)
 	}
-	_ = updateState(func(s *State) { s.Default = "hangar:m_a" })
+	_ = updateState(func(s *State) { s.Default = "instabox:m_a" })
 	_ = newWorkspace()
-	_ = updateState(func(s *State) { s.Default = "hangar:m_b" })
+	_ = updateState(func(s *State) { s.Default = "instabox:m_b" })
 	_ = newWorkspace()
 	h := f.herdr()
 	if strings.Join(h.Workspaces, ",") != "local,alpha" {
@@ -342,12 +342,12 @@ func TestNewWorkspaceUsesTheDefault(t *testing.T) {
 	}
 }
 
-func TestHangarActionsByState(t *testing.T) {
+func TestInstaboxActionsByState(t *testing.T) {
 	m := model{st: readStateForTest(), templates: []Template{{ID: "herdr", Version: "1", Capabilities: []string{"identity-reset"}}}}
 	labels := func(state string) string {
-		r := row{kind: rowHangar, machine: Machine{ID: "m", Name: "m", State: state, Template: &TemplateRef{ID: "herdr", Version: "1"}}}
+		r := row{kind: rowInstabox, machine: Machine{ID: "m", Name: "m", State: state, Template: &TemplateRef{ID: "herdr", Version: "1"}}}
 		var out []string
-		for _, a := range m.hangarActions(r, "") {
+		for _, a := range m.instaboxActions(r, "") {
 			s := a.label
 			if a.reason != "" {
 				s += "(dim)"
@@ -412,12 +412,6 @@ func TestValidation(t *testing.T) {
 			t.Errorf("validName(%q) = %v", name, !ok)
 		}
 	}
-	if _, problem := validateInvite(" hgi_ABCDEFGHIJ0123456789 "); problem != "" {
-		t.Error(problem)
-	}
-	if _, problem := validateInvite("hgi_short"); problem == "" {
-		t.Error("short invite accepted")
-	}
 }
 
 func (f *fakeEnv) profiles(machineID string) int {
@@ -462,5 +456,23 @@ func TestSyncRemovesDuplicateProfiles(t *testing.T) {
 	f.sync()
 	if p, _ := f.profile("m_a"); f.profiles("m_a") != 1 || p.ID != "p2" {
 		t.Fatalf("after sync: %+v, want only the selected p2", f.herdr().Profiles)
+	}
+}
+
+// The server reports a failed machine's lastError as an object.
+func TestListMachinesReadsLastError(t *testing.T) {
+	m := fakeMachine("m_a", "alpha", "error")
+	m["lastError"] = map[string]any{"code": "internal", "message": "boot failed", "retryable": false}
+	newFake(t, m)
+	ms, err := listMachines()
+	if err != nil || len(ms) != 1 || ms[0].LastError == nil || ms[0].LastError.Message != "boot failed" {
+		t.Fatalf("listMachines = %+v, %v", ms, err)
+	}
+}
+
+func TestWhoamiParsesInstabox(t *testing.T) {
+	newFake(t)
+	if a := whoami(); a.Login != "tester" || a.UserID != "42" || a.Server != "https://instabox.test" {
+		t.Fatalf("whoami = %+v", a)
 	}
 }

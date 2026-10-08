@@ -28,7 +28,7 @@ func confirmDialog(title, verb, body string, j Job) *dialog {
 type chooser struct {
 	machine Machine
 	label   string
-	pick    int // 0 clone, 1 image
+	pick    int // 0 clone, 1 snapshot
 }
 
 type formKind int
@@ -38,8 +38,7 @@ const (
 	formSSH
 	formEdit
 	formClone
-	formImage
-	formSignUp
+	formSnapshot
 )
 
 type choice struct {
@@ -125,7 +124,7 @@ func (f *form) openChoice() *choice {
 // refreshPrimary labels the Copy button after the machine check.
 func (f *form) refreshPrimary() {
 	verb := "clone"
-	if f.kind == formImage {
+	if f.kind == formSnapshot {
 		verb = "save"
 	}
 	switch f.plan {
@@ -138,12 +137,12 @@ func (f *form) refreshPrimary() {
 
 // ---- opening dialogs ----
 
-func (m model) openAdd(imageID string) (tea.Model, tea.Cmd) {
+func (m model) openAdd(snapshotID string) (tea.Model, tea.Cmd) {
 	f := newForm(formAdd, "add remote", "create and connect")
-	f.addChoice("Provider", []string{"hangar", "SSH"}, []string{"hangar", "ssh"}, 0)
+	f.addChoice("Provider", []string{"instabox", "SSH"}, []string{"instabox", "ssh"}, 0)
 	f.addText("Name", "", "my-machine")
 	options, values, sel := []string{"Latest herdr template"}, []string{""}, 0
-	for _, im := range m.images {
+	for _, im := range m.snapshots {
 		from := "a deleted machine"
 		for _, mc := range m.machines {
 			if mc.ID == im.SourceMachineID {
@@ -152,7 +151,7 @@ func (m model) openAdd(imageID string) (tea.Model, tea.Cmd) {
 		}
 		options = append(options, fmt.Sprintf("%s · %s · from %s", im.Name, im.CreatedAt.Local().Format("2006-01-02"), from))
 		values = append(values, im.ID)
-		if im.ID == imageID {
+		if im.ID == snapshotID {
 			sel = len(values) - 1
 		}
 	}
@@ -167,20 +166,23 @@ func (m model) openAdd(imageID string) (tea.Model, tea.Cmd) {
 func (m model) addHint(f *form) string {
 	switch {
 	case !m.acct.SignedIn():
-		return "Not signed in to hangar. Press sign in to continue in your browser."
+		return "Not signed in to instabox. Press sign in to continue in your browser."
 	case f.value(2) != "":
-		return fmt.Sprintf("Creates a hangar machine from image %s: the packages and system configuration saved in it, with a new, empty /data (no home directory files, logins or workspace).", m.imageName(f.value(2)))
+		if sn, ok := m.snapshotByID(f.value(2)); ok && !sn.HasData() {
+			return fmt.Sprintf("Creates an instabox machine from snapshot %s: the packages and system configuration saved in it, with a new, empty /data (no home directory files, logins or workspace).", sn.Name)
+		}
+		return fmt.Sprintf("Creates an instabox machine from snapshot %s: its software, settings, and the repos, home files and logins on /data.", m.snapshotName(f.value(2)))
 	}
-	return "Creates a hangar machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from hangar settings. Your existing hangar machines are listed on the remotes tab on their own."
+	return "Creates an instabox machine from the herdr template with its default size and a persistent disk. Closing Herdr keeps it running; stop it from instabox settings. Your existing instabox machines are listed on the remotes tab on their own."
 }
 
 func sshForm() *form {
 	f := newForm(formSSH, "add remote", "add")
-	f.addChoice("Provider", []string{"hangar", "SSH"}, []string{"hangar", "ssh"}, 1)
+	f.addChoice("Provider", []string{"instabox", "SSH"}, []string{"instabox", "ssh"}, 1)
 	f.addText("Name", "", "shown in the sidebar")
 	f.addText("SSH target", "", "an SSH alias or user@host")
 	f.addText("Herdr session", "", "default")
-	f.text = "Use an existing SSH alias. hangar machines appear on their own; create one with Provider: hangar. Herdr checks the remote and asks before installing anything."
+	f.text = "Use an existing SSH alias. instabox machines appear on their own; create one with Provider: instabox. Herdr checks the remote and asks before installing anything."
 	f.focus = 2
 	f.syncFocus()
 	return f
@@ -189,9 +191,9 @@ func sshForm() *form {
 func (m model) openEdit(r row) (tea.Model, tea.Cmd) {
 	f := newForm(formEdit, "remote settings", "save")
 	f.row = r
-	if r.kind == rowHangar {
+	if r.kind == rowInstabox {
 		f.addText("Name", m.st.label(r.machine), r.machine.Name)
-		f.text = "This remote is a hangar machine; the plugin manages its SSH target and session. The name is shown only in Herdr (empty restores the hangar name)."
+		f.text = "This remote is an instabox machine; the plugin manages its SSH target and session. The name is shown only in Herdr (empty restores the instabox name)."
 	} else {
 		f.addText("Name", r.profile.Label, "")
 		f.text = fmt.Sprintf("SSH target %s · session %s. To change them, remove the remote and add it again.", r.profile.Target, orDefault(r.profile.Session, "default"))
@@ -208,8 +210,8 @@ func orDefault(s, d string) string {
 }
 
 const (
-	cloneContents = "A clone copies everything: installed software, system settings, repos and home files on /data, and logins (gh, claude). It becomes a second machine exactly like this one."
-	imageContents = "An image saves the root disk: installed software and system settings. Repos, home files and logins on /data are not included; machines created from it get an empty /data."
+	cloneContents    = "A clone copies everything: installed software, system settings, repos and home files on /data, and logins (gh, claude). It becomes a second machine exactly like this one."
+	snapshotContents = "A snapshot saves the root disk and /data: installed software, system settings, repos, home files and logins (gh, claude). New machines start from it as copies of this one."
 )
 
 func (m model) openCopyForm(c *chooser) (tea.Model, tea.Cmd) {
@@ -223,10 +225,10 @@ func (m model) openCopyForm(c *chooser) (tea.Model, tea.Cmd) {
 		f.addText("Name", name, "")
 		f.text = cloneContents
 	} else {
-		f = newForm(formImage, "save "+c.label+" as image", "save")
-		f.addText("Image name", "", "")
+		f = newForm(formSnapshot, "save "+c.label+" as snapshot", "save")
+		f.addText("Snapshot name", "", "")
 		f.addText("Description", "", "optional")
-		f.text = imageContents
+		f.text = snapshotContents
 	}
 	f.machine, f.label = c.machine, c.label
 	f.check = "Checking " + c.label + "…"
@@ -237,11 +239,11 @@ func (m model) openCopyForm(c *chooser) (tea.Model, tea.Cmd) {
 }
 
 // checkForCopy decides what Copy has to do first, as herdr's check worker does.
-func checkForCopy(id, label string, image bool, templates []Template) tea.Cmd {
+func checkForCopy(id, label string, snapshot bool, templates []Template) tea.Cmd {
 	return func() tea.Msg {
 		verb, does, stopVerb := "cloned", "clones it", "Stop machine and clone"
-		if image {
-			verb, does, stopVerb = "saved as an image", "saves the image", "Stop machine and save"
+		if snapshot {
+			verb, does, stopVerb = "saved as a snapshot", "saves the snapshot", "Stop machine and save"
 		}
 		mc, err := getMachine(id)
 		if err != nil {
@@ -319,8 +321,8 @@ func (m model) formKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	n := len(f.fields) + 1
 	switch k.String() {
 	case "esc":
-		if f.kind == formClone || f.kind == formImage {
-			m.dialog = &dialog{chooser: &chooser{machine: f.machine, label: f.label, pick: map[bool]int{true: 1}[f.kind == formImage]}}
+		if f.kind == formClone || f.kind == formSnapshot {
+			m.dialog = &dialog{chooser: &chooser{machine: f.machine, label: f.label, pick: map[bool]int{true: 1}[f.kind == formSnapshot]}}
 		} else {
 			m.dialog = nil
 		}
@@ -360,10 +362,10 @@ func (m model) formKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) pickChoice(c *choice, i int) (tea.Model, tea.Cmd) {
 	c.sel, c.open = i, false
 	f := m.dialog.form
-	// Switching the provider swaps the hangar form for the SSH one.
+	// Switching the provider swaps the instabox form for the SSH one.
 	if f.kind == formAdd && c == f.fields[0].choice && c.values[i] == "ssh" {
 		m.dialog = &dialog{form: sshForm()}
-	} else if f.kind == formSSH && c == f.fields[0].choice && c.values[i] == "hangar" {
+	} else if f.kind == formSSH && c == f.fields[0].choice && c.values[i] == "instabox" {
 		return m.openAdd("")
 	}
 	return m, nil
@@ -391,13 +393,13 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			f.err = nameRule("Machine")
 			return m, nil
 		}
-		image := f.value(2)
-		if image != "" && m.imageName(image) == image {
-			f.err = "The chosen image is no longer listed. Choose another source."
+		snapshot := f.value(2)
+		if snapshot != "" && m.snapshotName(snapshot) == snapshot {
+			f.err = "The chosen snapshot is no longer listed. Choose another source."
 			return m, nil
 		}
 		m.dialog = nil
-		return m.launch(Job{Kind: jobCreate, Name: name, Image: image, ImageName: m.imageName(image), MachineName: name})
+		return m.launch(Job{Kind: jobCreate, Name: name, Snapshot: snapshot, SnapshotName: m.snapshotName(snapshot), MachineName: name})
 
 	case formSSH:
 		label, target, session := f.value(1), f.value(2), f.value(3)
@@ -405,8 +407,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		case target == "":
 			f.err = "Enter an SSH target."
 			return m, nil
-		case strings.HasPrefix(target, TargetPrefix) || strings.HasPrefix(target, "hangar-m_"):
-			f.err = "hangar machines appear on their own once you sign in; create one with Provider: hangar."
+		case strings.HasPrefix(target, TargetPrefix) || strings.HasPrefix(target, "instabox-m_"):
+			f.err = "instabox machines appear on their own once you sign in; create one with Provider: instabox."
 			return m, nil
 		}
 		args := []string{"machine", "add", target}
@@ -425,7 +427,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		name := f.value(0)
 		r := f.row
 		m.dialog = nil
-		if r.kind == rowHangar {
+		if r.kind == rowInstabox {
 			mc := r.machine
 			return m, quick(true, func() (string, error) {
 				if err := updateState(func(s *State) {
@@ -449,13 +451,13 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			return "Saved.", err
 		})
 
-	case formClone, formImage:
+	case formClone, formSnapshot:
 		if f.plan == "" || f.plan == "none" {
 			return m, nil
 		}
 		name := f.value(0)
 		if !validName(name) {
-			f.err = nameRule(map[bool]string{true: "Machine", false: "Image"}[f.kind == formClone])
+			f.err = nameRule(map[bool]string{true: "Machine", false: "Snapshot"}[f.kind == formClone])
 			return m, nil
 		}
 		if f.kind == formClone {
@@ -468,16 +470,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dialog = nil
-		return m.launch(Job{Kind: jobSaveImage, MachineID: f.machine.ID, MachineName: f.label, Name: name, Description: desc})
-
-	case formSignUp:
-		code, problem := validateInvite(f.value(0))
-		if problem != "" {
-			f.err = problem
-			return m, nil
-		}
-		m.dialog = nil
-		return m.signIn(code)
+		return m.launch(Job{Kind: jobSaveSnapshot, MachineID: f.machine.ID, MachineName: f.label, Name: name, Description: desc})
 	}
 	return m, nil
 }

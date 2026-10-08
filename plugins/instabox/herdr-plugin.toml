@@ -1,0 +1,53 @@
+id = "v01dstar.instabox"
+name = "Instabox"
+version = "0.3.0"
+min_herdr_version = "0.9.0"
+description = "instabox cloud machines in herdr: sign in, create, start, stop, copy and connect them"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-o", "bin/herdr-instabox", "."]
+
+# Reconcile herdr's saved machines with instabox when herdr starts...
+[[startup]]
+command = ["bin/herdr-instabox", "sync"]
+
+# ...and, at most once a minute, as you move around.
+[[events]]
+on = "workspace.focused"
+command = ["bin/herdr-instabox", "sync", "--if-stale"]
+
+[[events]]
+on = "workspace.created"
+command = ["bin/herdr-instabox", "sync", "--if-stale"]
+
+[[actions]]
+id = "open"
+title = "instabox settings"
+contexts = ["workspace"]
+command = ["bin/herdr-instabox", "open"]
+
+[[actions]]
+id = "new-workspace"
+title = "New workspace on the default machine"
+contexts = ["workspace"]
+command = ["bin/herdr-instabox", "new-workspace"]
+
+# Switch these to placement = "popup" once the installed herdr supports it.
+[[panes]]
+id = "ui"
+title = "instabox settings"
+placement = "overlay"
+command = ["bin/herdr-instabox", "ui"]
+
+[[panes]]
+id = "snapshots"
+title = "instabox settings"
+placement = "overlay"
+command = ["bin/herdr-instabox", "ui", "snapshots"]
+
+[[panes]]
+id = "account"
+title = "instabox settings"
+placement = "overlay"
+command = ["bin/herdr-instabox", "ui", "account"]

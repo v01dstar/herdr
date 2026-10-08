@@ -1,12 +1,12 @@
-// herdr-hangar is a herdr plugin that manages hangar machines and keeps them in
+// herdr-instabox is a herdr plugin that manages instabox machines and keeps them in
 // herdr's saved SSH machines, so they appear in the sidebar like any remote.
 //
-//	herdr-hangar [ui]                   the remotes/images/account settings pane
-//	herdr-hangar open [tab]             open the settings pane (plugin action)
-//	herdr-hangar new-workspace          new workspace on the default machine
-//	herdr-hangar sync [--if-stale]      reconcile herdr with hangar (hooks)
-//	herdr-hangar job ID                 run a background job (internal)
-//	herdr-hangar ensure-cert ID HANGAR  refresh a certificate (ssh Match exec)
+//	herdr-instabox [ui]                   the remotes/snapshots/account settings pane
+//	herdr-instabox open [tab]             open the settings pane (plugin action)
+//	herdr-instabox new-workspace          new workspace on the default machine
+//	herdr-instabox sync [--if-stale]      reconcile herdr with instabox (hooks)
+//	herdr-instabox job ID                 run a background job (internal)
+//	herdr-instabox ensure-cert ID BIN     refresh a certificate (ssh Match exec)
 package main
 
 import (
@@ -51,7 +51,7 @@ func main() {
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "herdr-hangar:", err)
+		fmt.Fprintln(os.Stderr, "herdr-instabox:", err)
 		os.Exit(1)
 	}
 }
@@ -60,12 +60,12 @@ func pluginID() string {
 	if id := os.Getenv("HERDR_PLUGIN_ID"); id != "" {
 		return id
 	}
-	return "v01dstar.hangar"
+	return "v01dstar.instabox"
 }
 
 func openPane(tab string) error {
 	entry := "ui"
-	if tab == "account" || tab == "images" {
+	if tab == "account" || tab == "snapshots" {
 		entry = tab
 	}
 	cmd := exec.Command(herdrBin(), "plugin", "pane", "open",
@@ -113,7 +113,7 @@ func defaultTarget(st State) (target, label, problem string) {
 		return "", "", err.Error()
 	}
 	managed, ssh := splitProfiles(all)
-	if id, ok := strings.CutPrefix(st.Default, "hangar:"); ok {
+	if id, ok := strings.CutPrefix(st.Default, "instabox:"); ok {
 		label = st.Labels[id]
 		p, has := managed[id]
 		if label == "" && has {
@@ -124,9 +124,9 @@ func defaultTarget(st State) (target, label, problem string) {
 		}
 		switch {
 		case st.Hidden[id]:
-			return "", label, fmt.Sprintf("Default machine %s is hidden from the sidebar — show it in hangar settings, or choose another default.", label)
+			return "", label, fmt.Sprintf("Default machine %s is hidden from the sidebar — show it in instabox settings, or choose another default.", label)
 		case !has || !p.Enabled:
-			return "", label, fmt.Sprintf("Default machine %s isn't connected — start it in hangar settings, or choose another default.", label)
+			return "", label, fmt.Sprintf("Default machine %s isn't connected — start it in instabox settings, or choose another default.", label)
 		}
 		return p.ID, label, ""
 	}
@@ -134,7 +134,7 @@ func defaultTarget(st State) (target, label, problem string) {
 		for _, p := range ssh {
 			if p.ID == id {
 				if !p.Enabled {
-					return "", p.Label, fmt.Sprintf("Default machine %s isn't connected — enable it in hangar settings, or choose another default.", p.Label)
+					return "", p.Label, fmt.Sprintf("Default machine %s isn't connected — enable it in instabox settings, or choose another default.", p.Label)
 				}
 				return p.ID, p.Label, ""
 			}

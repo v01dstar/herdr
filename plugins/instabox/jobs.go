@@ -14,39 +14,39 @@ import (
 	"time"
 )
 
-// Long operations run as detached `herdr-hangar job <id>` processes, so closing
+// Long operations run as detached `herdr-instabox job <id>` processes, so closing
 // the settings pane never interrupts one. Each job records its progress and
 // result in a file the pane polls; a result that arrives while the pane is
 // closed becomes a herdr notification.
 
 type Job struct {
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"`
-	MachineID   string    `json:"machineId,omitempty"`
-	MachineName string    `json:"machineName,omitempty"`
-	Name        string    `json:"name,omitempty"`        // new machine or image name
-	Image       string    `json:"image,omitempty"`       // source image ID or name
-	ImageName   string    `json:"imageName,omitempty"`   // for messages
-	Description string    `json:"description,omitempty"` // image description
-	Status      string    `json:"status"`                // running, done, failed
-	Progress    string    `json:"progress,omitempty"`
-	Result      string    `json:"result,omitempty"`
-	PID         int       `json:"pid,omitempty"`
-	Seen        bool      `json:"seen,omitempty"`
-	Started     time.Time `json:"started"`
-	Updated     time.Time `json:"updated"`
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"`
+	MachineID    string    `json:"machineId,omitempty"`
+	MachineName  string    `json:"machineName,omitempty"`
+	Name         string    `json:"name,omitempty"`         // new machine or snapshot name
+	Snapshot     string    `json:"snapshot,omitempty"`     // source snapshot ID or name
+	SnapshotName string    `json:"snapshotName,omitempty"` // for messages
+	Description  string    `json:"description,omitempty"`  // snapshot description
+	Status       string    `json:"status"`                 // running, done, failed
+	Progress     string    `json:"progress,omitempty"`
+	Result       string    `json:"result,omitempty"`
+	PID          int       `json:"pid,omitempty"`
+	Seen         bool      `json:"seen,omitempty"`
+	Started      time.Time `json:"started"`
+	Updated      time.Time `json:"updated"`
 }
 
 const (
-	jobCreate      = "create"
-	jobStart       = "start"
-	jobResume      = "resume"
-	jobSuspend     = "suspend"
-	jobStop        = "stop"
-	jobDelete      = "delete"
-	jobClone       = "clone"
-	jobSaveImage   = "save-image"
-	jobDeleteImage = "delete-image"
+	jobCreate         = "create"
+	jobStart          = "start"
+	jobResume         = "resume"
+	jobSuspend        = "suspend"
+	jobStop           = "stop"
+	jobDelete         = "delete"
+	jobClone          = "clone"
+	jobSaveSnapshot   = "save-snapshot"
+	jobDeleteSnapshot = "delete-snapshot"
 )
 
 func jobsDir() string { return filepath.Join(stateDir(), "jobs") }
@@ -167,9 +167,9 @@ func runJob(id string) error {
 	}
 	j.Progress = ""
 	if !uiAlive() {
-		title := "hangar"
+		title := "instabox"
 		if j.Status == "failed" {
-			title = "hangar: operation failed"
+			title = "instabox: operation failed"
 		}
 		notify(title, j.Result)
 		j.Seen = true
@@ -186,7 +186,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 	case jobStart:
 		progress("Starting %s…", name)
 		_ = updateState(func(s *State) { delete(s.Fence, j.MachineID) })
-		if _, err := hangar("start", j.MachineID); err != nil {
+		if _, err := instabox("start", j.MachineID); err != nil {
 			return "", err
 		}
 		if err := connectWhenReady(j.MachineID, progress, true); err != nil {
@@ -197,7 +197,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 	case jobResume:
 		progress("Resuming %s…", name)
 		_ = updateState(func(s *State) { delete(s.Fence, j.MachineID) })
-		if _, err := hangar("resume", j.MachineID); err != nil {
+		if _, err := instabox("resume", j.MachineID); err != nil {
 			return "", err
 		}
 		if err := connectWhenReady(j.MachineID, progress, false); err != nil {
@@ -210,7 +210,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 		if err := disconnect(j.MachineID); err != nil {
 			return "", err
 		}
-		if _, err := hangar("suspend", j.MachineID); err != nil {
+		if _, err := instabox("suspend", j.MachineID); err != nil {
 			return "", err
 		}
 		return name + ": suspended. Running programs continue after Resume.", nil
@@ -221,7 +221,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 			return "", err
 		}
 		warning := stopRemoteSession(j.MachineID)
-		if _, err := hangar("stop", j.MachineID); err != nil {
+		if _, err := instabox("stop", j.MachineID); err != nil {
 			return "", err
 		}
 		if warning != "" {
@@ -233,18 +233,18 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 		progress("Deleting %s…", name)
 		_ = disconnect(j.MachineID)
 		_ = stopRemoteSession(j.MachineID)
-		_, err := hangar("rm", j.MachineID)
+		_, err := instabox("rm", j.MachineID)
 		switch {
 		case notFound(err):
 			_ = forgetMachine(j.MachineID)
-			return fmt.Sprintf("hangar machine '%s' was already deleted.", name), nil
+			return fmt.Sprintf("instabox machine '%s' was already deleted.", name), nil
 		case err != nil:
 			return "", fmt.Errorf("Could not delete '%s': %v. It stays listed and does not reconnect for a few minutes. Retry Delete machine…, or Start it to keep using it.", name, err)
 		}
 		if err := forgetMachine(j.MachineID); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Deleted hangar machine '%s'.", name), nil
+		return fmt.Sprintf("Deleted instabox machine '%s'.", name), nil
 
 	case jobClone:
 		stopped, err := prepareStopped(j.MachineID, name, progress)
@@ -252,7 +252,7 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 			return "", err
 		}
 		progress("Cloning %s into %s…", name, j.Name)
-		if _, err := hangar("fork", j.MachineID, j.Name); err != nil {
+		if _, err := instabox("fork", j.MachineID, j.Name); err != nil {
 			return "", err
 		}
 		if m, err := getMachine(j.Name); err == nil && m.State == "running" {
@@ -266,49 +266,49 @@ func (j *Job) run(progress func(string, ...any)) (string, error) {
 		}
 		return msg, nil
 
-	case jobSaveImage:
+	case jobSaveSnapshot:
 		stopped, err := prepareStopped(j.MachineID, name, progress)
 		if err != nil {
 			return "", err
 		}
-		progress("Saving image %s from %s…", j.Name, name)
-		args := []string{"image", "save", j.MachineID, "--name", j.Name}
+		progress("Saving snapshot %s from %s…", j.Name, name)
+		args := []string{"snapshot", "save", j.MachineID, "--name", j.Name}
 		if j.Description != "" {
 			args = append(args, "--description", j.Description)
 		}
-		if _, err := hangar(args...); err != nil {
+		if _, err := instabox(args...); err != nil {
 			return "", err
 		}
-		msg := fmt.Sprintf("Saved image %s from %s. It is listed on the images tab; New machine from image… starts machines from it.", j.Name, name)
+		msg := fmt.Sprintf("Saved snapshot %s from %s. It is listed on the snapshots tab; New machine from snapshot… starts machines from it.", j.Name, name)
 		if stopped {
 			msg += fmt.Sprintf(" %s stays stopped; Start it to work on it again.", name)
 		}
 		return msg, nil
 
-	case jobDeleteImage:
-		progress("Deleting image %s…", j.ImageName)
-		_, err := hangar("image", "rm", j.Image)
+	case jobDeleteSnapshot:
+		progress("Deleting snapshot %s…", j.SnapshotName)
+		_, err := instabox("snapshot", "rm", j.Snapshot)
 		if notFound(err) {
-			return fmt.Sprintf("Image %s was already deleted.", j.ImageName), nil
+			return fmt.Sprintf("Snapshot %s was already deleted.", j.SnapshotName), nil
 		}
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Deleted image %s.", j.ImageName), nil
+		return fmt.Sprintf("Deleted snapshot %s.", j.SnapshotName), nil
 	}
 	return "", fmt.Errorf("unknown job kind %q", j.Kind)
 }
 
 func createMachine(j *Job, progress func(string, ...any)) (string, error) {
 	args := []string{"create", "--name", j.Name, "--no-wait"}
-	if j.Image != "" {
-		args = append(args, "--image", j.Image)
-		progress("Creating hangar machine %s from image %s…", j.Name, j.ImageName)
+	if j.Snapshot != "" {
+		args = append(args, "--snapshot", j.Snapshot)
+		progress("Creating instabox machine %s from snapshot %s…", j.Name, j.SnapshotName)
 	} else {
 		args = append(args, "--template", "herdr")
-		progress("Creating hangar machine %s…", j.Name)
+		progress("Creating instabox machine %s…", j.Name)
 	}
-	if _, err := hangar(args...); err != nil {
+	if _, err := instabox(args...); err != nil {
 		return "", err
 	}
 	deadline := time.Now().Add(15 * time.Minute)
@@ -324,12 +324,12 @@ func createMachine(j *Job, progress func(string, ...any)) (string, error) {
 				}
 				return j.Name + " is ready. Select it in the sidebar.", nil
 			case "stopped", "suspended", "error", "failed":
-				return fmt.Sprintf("%s is listed. It is %s; Start it from hangar settings.", j.Name, m.State), nil
+				return fmt.Sprintf("%s is listed. It is %s; Start it from instabox settings.", j.Name, m.State), nil
 			}
-			progress("hangar: %s %s…", j.Name, m.State)
+			progress("instabox: %s %s…", j.Name, m.State)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("%s is still %s after 15 minutes; check hangar settings later", j.Name, m.State)
+			return "", fmt.Errorf("%s is still %s after 15 minutes; check instabox settings later", j.Name, m.State)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -379,7 +379,7 @@ func reconcileMachine(m Machine) error {
 // stopRemoteSession asks the machine's Herdr session to shut down cleanly
 // before the machine stops. Best effort: it returns a warning, never an error.
 func stopRemoteSession(id string) string {
-	_, err := hangar("exec", id, "--timeout", "20", "--",
+	_, err := instabox("exec", id, "--timeout", "20", "--",
 		"herdr", "--session", RemoteSession, "server", "stop")
 	if err != nil {
 		return err.Error()
@@ -400,11 +400,11 @@ func prepareStopped(id, name string, progress func(string, ...any)) (bool, error
 			return false, nil
 		}
 		progress("Uploading the changes on %s…", name)
-		_, err = hangar("stop", id)
+		_, err = instabox("stop", id)
 		return true, err
 	case "suspended":
 		progress("Resuming %s so it can stop…", name)
-		if _, err := hangar("resume", id); err != nil {
+		if _, err := instabox("resume", id); err != nil {
 			return false, err
 		}
 		fallthrough
@@ -414,7 +414,7 @@ func prepareStopped(id, name string, progress func(string, ...any)) (bool, error
 			return false, err
 		}
 		_ = stopRemoteSession(id)
-		_, err = hangar("stop", id)
+		_, err = instabox("stop", id)
 		return true, err
 	}
 	return false, errors.New("Wait until it is stopped or running, then try again.")

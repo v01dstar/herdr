@@ -1,4 +1,4 @@
-module github.com/v01dstar/herdr-hangar
+module github.com/v01dstar/herdr-instabox
 
 go 1.27.1
 

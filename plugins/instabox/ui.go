@@ -9,16 +9,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// The settings pane mirrors herdr's own Settings → remotes / images / account:
+// The settings pane mirrors herdr's own Settings → remotes / snapshots / account:
 // a tab strip, a list with an action column, a message strip and dialogs.
 
 const (
 	tabRemotes = iota
-	tabImages
+	tabSnapshots
 	tabAccount
 )
 
-var tabNames = []string{"remotes", "images", "account"}
+var tabNames = []string{"remotes", "snapshots", "account"}
 
 const syncEvery = 15 * time.Second
 
@@ -36,9 +36,9 @@ type (
 		templates []Template
 		err       error
 	}
-	imagesMsg struct {
-		images []Image
-		err    error
+	snapshotsMsg struct {
+		snapshots []Snapshot
+		err       error
 	}
 	usageMsg struct {
 		usage Usage
@@ -61,12 +61,12 @@ type (
 type model struct {
 	w, h  int
 	tab   int
-	focus int    // remotes and images: 0 list, 1 actions
+	focus int    // remotes and snapshots: 0 list, 1 actions
 	sel   int    // remotes row
 	selID string // the selected row's identity, kept across list refreshes
 	act   int    // remotes action
-	img   int    // images row
-	imgAc int    // images action
+	img   int    // snapshots row
+	imgAc int    // snapshots action
 	accAc int    // account action
 
 	acct      Account
@@ -78,11 +78,11 @@ type model struct {
 	lastSync  time.Time
 	templates []Template
 
-	images       []Image
-	imagesErr    error
-	imagesLoaded bool
-	usage        *Usage
-	usageErr     error
+	snapshots       []Snapshot
+	snapshotsErr    error
+	snapshotsLoaded bool
+	usage           *Usage
+	usageErr        error
 
 	st   State
 	jobs []Job
@@ -95,10 +95,10 @@ type model struct {
 }
 
 func newModel(tab string) model {
-	m := model{hit: &hits{}, message: "Loading your hangar machines…", st: readState()}
+	m := model{hit: &hits{}, message: "Loading your instabox machines…", st: readState()}
 	switch tab {
-	case "images":
-		m.tab = tabImages
+	case "snapshots":
+		m.tab = tabSnapshots
 	case "account":
 		m.tab = tabAccount
 	}
@@ -107,7 +107,7 @@ func newModel(tab string) model {
 
 func (m model) Init() tea.Cmd {
 	touchUIAlive()
-	return tea.Batch(doSync, loadTemplates, loadImages, loadUsage, tick())
+	return tea.Batch(doSync, loadTemplates, loadSnapshots, loadUsage, tick())
 }
 
 func tick() tea.Cmd {
@@ -121,9 +121,9 @@ func loadTemplates() tea.Msg {
 	return templatesMsg{t, err}
 }
 
-func loadImages() tea.Msg {
-	im, err := listImages()
-	return imagesMsg{im, err}
+func loadSnapshots() tea.Msg {
+	im, err := listSnapshots()
+	return snapshotsMsg{im, err}
 }
 
 func loadUsage() tea.Msg {
@@ -162,7 +162,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.say(msgOK, "%s", j.Result)
 				}
-				cmds = append(cmds, doSync, loadImages, loadUsage)
+				cmds = append(cmds, doSync, loadSnapshots, loadUsage)
 			}
 		}
 		m.jobs = listJobs()
@@ -181,14 +181,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.machines = nil
 		}
 		if msg.Note != "" && msg.Note != m.note && len(m.machines) > 0 {
-			m.say(msgInfo, "hangar machines are %s; showing the last synced list.", msg.Note)
-		} else if msg.Note == "" && strings.HasPrefix(m.message, "hangar machines are ") {
+			m.say(msgInfo, "instabox machines are %s; showing the last synced list.", msg.Note)
+		} else if msg.Note == "" && strings.HasPrefix(m.message, "instabox machines are ") {
 			m.message = ""
 		}
 		m.note = msg.Note
 		m.profiles = msg.Profiles
 		m.st = readState()
-		if m.message == "Loading your hangar machines…" {
+		if m.message == "Loading your instabox machines…" {
 			m.message = ""
 		}
 		if msg.Err != nil && msg.Note == "" {
@@ -207,8 +207,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case imagesMsg:
-		m.images, m.imagesErr, m.imagesLoaded = msg.images, msg.err, true
+	case snapshotsMsg:
+		m.snapshots, m.snapshotsErr, m.snapshotsLoaded = msg.snapshots, msg.err, true
 		m.clamp()
 		return m, nil
 
@@ -231,7 +231,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobs = listJobs()
 		if msg.resync {
 			m.syncing = true
-			return m, tea.Batch(doSync, loadImages, loadUsage)
+			return m, tea.Batch(doSync, loadSnapshots, loadUsage)
 		}
 		return m, nil
 
@@ -271,8 +271,8 @@ func (m *model) clamp() {
 	}()
 	m.sel = clampTo(m.sel, len(m.rows()))
 	m.act = clampTo(m.act, len(m.remoteActions()))
-	m.img = clampTo(m.img, len(m.images))
-	m.imgAc = clampTo(m.imgAc, len(m.imageActions()))
+	m.img = clampTo(m.img, len(m.snapshots))
+	m.imgAc = clampTo(m.imgAc, len(m.snapshotActions()))
 	m.accAc = clampTo(m.accAc, len(m.accountActions()))
 }
 
@@ -296,7 +296,7 @@ func (m model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case "r":
 		m.syncing = true
-		return m, tea.Batch(doSync, loadImages, loadUsage, loadTemplates)
+		return m, tea.Batch(doSync, loadSnapshots, loadUsage, loadTemplates)
 	case "enter", " ":
 		return m.enter()
 	}
@@ -308,8 +308,8 @@ func (m model) switchTab(d int) (tea.Model, tea.Cmd) {
 	m.focus = 0
 	m.clamp()
 	switch m.tab {
-	case tabImages:
-		return m, loadImages
+	case tabSnapshots:
+		return m, loadSnapshots
 	case tabAccount:
 		return m, loadUsage
 	}
@@ -323,10 +323,10 @@ func (m *model) move(d int) {
 		m.act, m.selID = 0, ""
 	case m.tab == tabRemotes:
 		m.act += d
-	case m.tab == tabImages && m.focus == 0:
+	case m.tab == tabSnapshots && m.focus == 0:
 		m.img += d
 		m.imgAc = 0
-	case m.tab == tabImages:
+	case m.tab == tabSnapshots:
 		m.imgAc += d
 	default:
 		m.accAc += d
@@ -348,24 +348,24 @@ func (m model) enter() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.runRemoteAction()
-	case tabImages:
+	case tabSnapshots:
 		if m.focus == 0 {
-			if len(m.images) > 0 {
+			if len(m.snapshots) > 0 {
 				m.focus = 1
 			}
 			return m, nil
 		}
-		return m.runImageAction()
+		return m.runSnapshotAction()
 	}
 	return m.runAccountAction()
 }
 
-// busyOn reports a running job for a machine (or image), so the same target
+// busyOn reports a running job for a machine (or snapshot), so the same target
 // never gets two operations at once.
 func (m model) busyOn(id string) *Job {
 	for i := range m.jobs {
 		j := &m.jobs[i]
-		if j.Status == "running" && (j.MachineID == id || j.Image == id) {
+		if j.Status == "running" && (j.MachineID == id || j.Snapshot == id) {
 			return j
 		}
 	}

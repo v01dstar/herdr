@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""A fake hangar CLI for tests: state lives in $FAKE_DIR/hangar.json."""
+"""A fake instabox CLI for tests: state lives in $FAKE_DIR/instabox.json."""
 import json, os, sys
 
-path = os.path.join(os.environ["FAKE_DIR"], "hangar.json")
+path = os.path.join(os.environ["FAKE_DIR"], "instabox.json")
 st = json.load(open(path)) if os.path.exists(path) else {}
 st.setdefault("signedIn", True)
 st["machines"] = st.get("machines") or []
-st["images"] = st.get("images") or []
+st["snapshots"] = st.get("snapshots") or []
 log = open(os.path.join(os.environ["FAKE_DIR"], "calls.log"), "a")
 args = sys.argv[1:]
-log.write("hangar " + " ".join(args) + "\n")
+log.write("instabox " + " ".join(args) + "\n")
 
 def save():
     # Atomic, so concurrent fake calls never read a half-written file.
@@ -18,7 +18,7 @@ def save():
     os.replace(tmp, path)
 
 def fail(msg, code=1):
-    print("hangar: " + msg, file=sys.stderr)
+    print("instabox: " + msg, file=sys.stderr)
     sys.exit(code)
 
 def find(ref):
@@ -27,25 +27,28 @@ def find(ref):
             return m
     fail("machine %s not found" % ref)
 
-def machine(name, state="running", image=None):
-    n = len(st["machines"]) + len(st["images"]) + 1
+def machine(name, state="running", snapshot=None):
+    n = len(st["machines"]) + len(st["snapshots"]) + 1
     m = {"id": "m_fake%04d" % n, "name": name, "state": state, "desiredState": state,
          "template": {"id": "herdr", "version": "2026-10-05.1"},
          "spec": {"vcpus": 4, "memMiB": 8192, "persistentDiskGiB": 20, "rootDiskGiB": 16},
          "storage": {"sizeGiB": 20, "synced": True}, "runtime": {"ready": True},
-         "metadata": {}, "createdAt": "2026-10-05T00:00:00Z"}
-    if image:
-        m["image"] = {"id": image}
+         "metadata": {}, "lastError": None, "createdAt": "2026-10-05T00:00:00Z"}
+    if snapshot:
+        m["snapshot"] = {"id": snapshot}
     st["machines"].append(m)
     return m
 
 cmd = args[0] if args else ""
 if cmd not in ("login", "templates") and not st["signedIn"]:
-    fail("not logged in; run `hangar login`")
+    fail("not logged in; run `instabox login`")
 
 if cmd == "whoami":
-    print("tester (GitHub user 42) on https://hangar.test")
+    print("tester (user 42) on https://instabox.test")
 elif cmd == "login":
+    if "--invite" in args:
+        fail("unexpected --invite", 2)
+    st["provider"] = args[args.index("--provider") + 1] if "--provider" in args else "github"
     st["signedIn"] = True
     print("Signed in.")
 elif cmd == "logout":
@@ -59,11 +62,11 @@ elif cmd == "templates":
                                      "defaultSpec": {"vcpus": 4, "memMiB": 8192, "persistentDiskGiB": 20}}]}))
 elif cmd == "usage":
     print(json.dumps({"computedAt": "2026-10-05T12:00:00Z", "storedBytes": 1 << 30, "machines": len(st["machines"]),
-                      "images": len(st["images"]), "limits": {"maxMachines": 10, "maxImages": 10, "maxStoredGiB": 200}}))
+                      "snapshots": len(st["snapshots"]), "limits": {"maxMachines": 10, "maxSnapshots": 10, "maxStoredGiB": 200}}))
 elif cmd == "create":
     name = args[args.index("--name") + 1]
-    image = args[args.index("--image") + 1] if "--image" in args else None
-    machine(name, "running", image)
+    snapshot = args[args.index("--snapshot") + 1] if "--snapshot" in args else None
+    machine(name, "running", snapshot)
 elif cmd in ("start", "resume"):
     find(args[1])["state"] = "running"
 elif cmd == "stop":
@@ -77,28 +80,31 @@ elif cmd == "fork":
     if src["state"] != "stopped":
         fail("machine must be stopped")
     machine(args[2])
-elif cmd == "image":
+elif cmd == "snapshot":
     sub = args[1]
     if sub == "ls":
-        print(json.dumps(st["images"]))
+        print(json.dumps(st["snapshots"]))
     elif sub == "save":
         src = find(args[2])
         if src["state"] != "stopped":
             fail("machine must be stopped")
         name = args[args.index("--name") + 1]
-        st["images"].append({"id": "im_fake%d" % (len(st["images"]) + 1), "name": name, "owned": True,
-                             "sourceMachineId": src["id"], "rootSizeBytes": 1 << 34, "exclusiveBytes": 1 << 20,
-                             "template": src["template"], "createdAt": "2026-10-05T01:00:00Z"})
+        sn = {"id": "sn_fake%d" % (len(st["snapshots"]) + 1), "name": name,
+              "sourceMachineId": src["id"], "rootSizeBytes": 1 << 34, "exclusiveBytes": 1 << 20,
+              "template": src["template"], "createdAt": "2026-10-05T01:00:00Z"}
+        if "--root-only" not in args:
+            sn["dataSizeBytes"] = 1 << 33
+        st["snapshots"].append(sn)
     elif sub == "rm":
-        before = len(st["images"])
-        st["images"] = [i for i in st["images"] if i["id"] != args[2] and i["name"] != args[2]]
-        if len(st["images"]) == before:
-            fail("image %s not found" % args[2])
+        before = len(st["snapshots"])
+        st["snapshots"] = [i for i in st["snapshots"] if i["id"] != args[2] and i["name"] != args[2]]
+        if len(st["snapshots"]) == before:
+            fail("snapshot %s not found" % args[2])
 elif cmd == "exec":
     pass
 elif cmd == "ssh-config":
     m = find(args[1])
-    print("# hangar machine %s\nHost hangar-%s\n  HostName 127.0.0.1\n  Port 2222\n  User %s" % (m["name"], m["name"], m["id"]))
+    print("# instabox machine %s\nHost instabox-%s\n  HostName 127.0.0.1\n  Port 2222\n  User %s" % (m["name"], m["name"], m["id"]))
 elif cmd == "ssh-cert":
     pass
 else:

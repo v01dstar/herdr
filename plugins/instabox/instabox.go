@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// The hangar CLI is the plugin's only path to the control plane: it owns the
-// sign-in (~/.config/hangar/credentials.json), certificates and the API.
+// The instabox CLI is the plugin's only path to the control plane: it owns the
+// sign-in (~/.config/instabox/credentials.json), certificates and the API.
 
 type Spec struct {
 	VCPUs             int `json:"vcpus"`
@@ -43,9 +43,9 @@ type Machine struct {
 	DesiredState string       `json:"desiredState"`
 	OperationID  *string      `json:"operationId"`
 	Template     *TemplateRef `json:"template"`
-	Image        *struct {
+	Snapshot     *struct {
 		ID string `json:"id"`
-	} `json:"image"`
+	} `json:"snapshot"`
 	Spec    Spec `json:"spec"`
 	Storage struct {
 		SizeGiB int  `json:"sizeGiB"`
@@ -55,8 +55,10 @@ type Machine struct {
 		Ready bool `json:"ready"`
 	} `json:"runtime"`
 	Metadata  map[string]string `json:"metadata"`
-	LastError string            `json:"lastError"`
-	CreatedAt time.Time         `json:"createdAt"`
+	LastError *struct {
+		Message string `json:"message"`
+	} `json:"lastError"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (m Machine) Target() string { return TargetPrefix + m.ID }
@@ -78,32 +80,34 @@ func (t Template) Has(capability string) bool {
 	return false
 }
 
-type Image struct {
+type Snapshot struct {
 	ID              string       `json:"id"`
 	Name            string       `json:"name"`
 	Description     string       `json:"description"`
 	SourceMachineID string       `json:"sourceMachineId"`
 	Template        *TemplateRef `json:"template"`
 	RootSizeBytes   int64        `json:"rootSizeBytes"`
-	ExclusiveBytes  int64        `json:"exclusiveBytes"`
-	CreatedAt       time.Time    `json:"createdAt"`
-	Official        bool         `json:"official"`
-	Owned           bool         `json:"owned"`
+	// DataSizeBytes is 0 for a root-only snapshot (older ones are).
+	DataSizeBytes  int64     `json:"dataSizeBytes"`
+	ExclusiveBytes int64     `json:"exclusiveBytes"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
+
+func (s Snapshot) HasData() bool { return s.DataSizeBytes > 0 }
 
 type Usage struct {
 	ComputedAt  *time.Time `json:"computedAt"`
 	StoredBytes int64      `json:"storedBytes"`
 	Machines    int        `json:"machines"`
-	Images      int        `json:"images"`
+	Snapshots   int        `json:"snapshots"`
 	Limits      struct {
 		MaxMachines  int `json:"maxMachines"`
-		MaxImages    int `json:"maxImages"`
+		MaxSnapshots int `json:"maxSnapshots"`
 		MaxStoredGiB int `json:"maxStoredGiB"`
 	} `json:"limits"`
 }
 
-// Account is the parsed `hangar whoami`.
+// Account is the parsed `instabox whoami`.
 type Account struct {
 	Login, UserID, Server string
 	// SignedOut is a definite "nobody is signed in"; Err is any other failure,
@@ -117,20 +121,20 @@ func (a Account) SignedIn() bool { return a.Login != "" }
 // Key identifies an account across sign-ins.
 func (a Account) Key() string { return a.UserID + "@" + a.Server }
 
-func hangarBin() string {
-	if bin := os.Getenv("HANGAR_BIN"); bin != "" {
+func instaboxBin() string {
+	if bin := os.Getenv("INSTABOX_BIN"); bin != "" {
 		return bin
 	}
-	if path, err := exec.LookPath("hangar"); err == nil {
+	if path, err := exec.LookPath("instabox"); err == nil {
 		return path
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		path := filepath.Join(home, ".local", "bin", "hangar")
+		path := filepath.Join(home, ".local", "bin", "instabox")
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}
 	}
-	return "hangar"
+	return "instabox"
 }
 
 // run executes a command without a terminal and returns its stdout. A failure
@@ -150,30 +154,30 @@ func run(name string, args ...string) (string, error) {
 		} else {
 			msg = err.Error()
 		}
-		msg = strings.TrimPrefix(msg, "hangar: ")
+		msg = strings.TrimPrefix(msg, "instabox: ")
 		msg = strings.TrimPrefix(msg, "herdr: ")
 		return stdout.String(), errors.New(msg)
 	}
 	return stdout.String(), nil
 }
 
-func hangar(args ...string) (string, error) { return run(hangarBin(), args...) }
+func instabox(args ...string) (string, error) { return run(instaboxBin(), args...) }
 
-func hangarJSON(v any, args ...string) error {
-	out, err := hangar(append(args, "--json")...)
+func instaboxJSON(v any, args ...string) error {
+	out, err := instabox(append(args, "--json")...)
 	if err != nil {
 		return err
 	}
 	if err := json.Unmarshal([]byte(out), v); err != nil {
-		return fmt.Errorf("hangar %s: unexpected output: %w", args[0], err)
+		return fmt.Errorf("instabox %s: unexpected output: %w", args[0], err)
 	}
 	return nil
 }
 
-var whoamiPattern = regexp.MustCompile(`^(\S+) \(GitHub user (\d+)\) on (\S+)`)
+var whoamiPattern = regexp.MustCompile(`^(\S+) \(user (\d+)\) on (\S+)`)
 
 func whoami() Account {
-	out, err := hangar("whoami")
+	out, err := instabox("whoami")
 	if err != nil {
 		if strings.Contains(err.Error(), "not logged in") {
 			return Account{SignedOut: true, Server: defaultServer()}
@@ -182,23 +186,23 @@ func whoami() Account {
 	}
 	m := whoamiPattern.FindStringSubmatch(strings.TrimSpace(out))
 	if m == nil {
-		return Account{Err: fmt.Errorf("unexpected hangar whoami output: %s", strings.TrimSpace(out))}
+		return Account{Err: fmt.Errorf("unexpected instabox whoami output: %s", strings.TrimSpace(out))}
 	}
 	return Account{Login: m[1], UserID: m[2], Server: m[3]}
 }
 
 func defaultServer() string {
-	for _, env := range []string{"HANGAR_SERVER", "HANGAR_API_URL"} {
+	for _, env := range []string{"INSTABOX_SERVER", "INSTABOX_API_URL"} {
 		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
 			return strings.TrimRight(v, "/")
 		}
 	}
-	return "https://152.236.1.51"
+	return "https://api.box.instacloud.com"
 }
 
 func listMachines() ([]Machine, error) {
 	var machines []Machine
-	if err := hangarJSON(&machines, "ls"); err != nil {
+	if err := instaboxJSON(&machines, "ls"); err != nil {
 		return nil, err
 	}
 	return machines, nil
@@ -206,7 +210,7 @@ func listMachines() ([]Machine, error) {
 
 func getMachine(id string) (Machine, error) {
 	var m Machine
-	err := hangarJSON(&m, "get", id)
+	err := instaboxJSON(&m, "get", id)
 	return m, err
 }
 
@@ -214,13 +218,13 @@ func listTemplates() ([]Template, error) {
 	var out struct {
 		Templates []Template `json:"templates"`
 	}
-	if err := hangarJSON(&out, "templates"); err != nil {
+	if err := instaboxJSON(&out, "templates"); err != nil {
 		return nil, err
 	}
 	return out.Templates, nil
 }
 
-// templateFor finds the catalog entry a machine or image was made from.
+// templateFor finds the catalog entry a machine or snapshot was made from.
 func templateFor(templates []Template, ref *TemplateRef) (Template, bool) {
 	if ref == nil {
 		return Template{}, false
@@ -233,34 +237,28 @@ func templateFor(templates []Template, ref *TemplateRef) (Template, bool) {
 	return Template{}, false
 }
 
-// listImages returns the account's own images, newest first.
-func listImages() ([]Image, error) {
-	var all []Image
-	if err := hangarJSON(&all, "image", "ls"); err != nil {
+// listSnapshots returns the account's snapshots (always private), newest first.
+func listSnapshots() ([]Snapshot, error) {
+	var snapshots []Snapshot
+	if err := instaboxJSON(&snapshots, "snapshot", "ls"); err != nil {
 		return nil, err
 	}
-	var images []Image
-	for _, im := range all {
-		if im.Owned {
-			images = append(images, im)
+	sort.SliceStable(snapshots, func(i, j int) bool {
+		if !snapshots[i].CreatedAt.Equal(snapshots[j].CreatedAt) {
+			return snapshots[i].CreatedAt.After(snapshots[j].CreatedAt)
 		}
-	}
-	sort.SliceStable(images, func(i, j int) bool {
-		if !images[i].CreatedAt.Equal(images[j].CreatedAt) {
-			return images[i].CreatedAt.After(images[j].CreatedAt)
-		}
-		return images[i].Name < images[j].Name
+		return snapshots[i].Name < snapshots[j].Name
 	})
-	return images, nil
+	return snapshots, nil
 }
 
 func getUsage() (Usage, error) {
 	var u Usage
-	err := hangarJSON(&u, "usage")
+	err := instaboxJSON(&u, "usage")
 	return u, err
 }
 
-// notFound tells a deleted machine or image from other failures.
+// notFound tells a deleted machine or snapshot from other failures.
 func notFound(err error) bool {
 	if err == nil {
 		return false
@@ -273,5 +271,3 @@ func notFound(err error) bool {
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func validName(name string) bool { return namePattern.MatchString(name) }
-
-var invitePattern = regexp.MustCompile(`^hgi_[A-Za-z0-9]{20}$`)

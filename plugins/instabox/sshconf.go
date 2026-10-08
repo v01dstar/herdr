@@ -51,14 +51,14 @@ func addInclude() error {
 		return err
 	}
 	if len(old) > 0 {
-		if err := os.WriteFile(path+".herdr-hangar.bak", old, 0o600); err != nil {
+		if err := os.WriteFile(path+".herdr-instabox.bak", old, 0o600); err != nil {
 			return err
 		}
 	}
 	return os.WriteFile(path, append([]byte(includeHeader()), old...), 0o600)
 }
 
-const includeComment = "# Added by the herdr hangar plugin."
+const includeComment = "# Added by the herdr instabox plugin."
 
 func includeHeader() string { return includeComment + "\n" + includeLine() + "\n\n" }
 
@@ -89,11 +89,11 @@ func removeInclude() error {
 	return os.WriteFile(path, []byte(text), 0o600)
 }
 
-// writeHostBlock asks hangar for the machine's Host block (which also issues a
+// writeHostBlock asks instabox for the machine's Host block (which also issues a
 // certificate), renames the host to the managed alias and saves it. A Match exec
 // line in front refreshes the short-lived certificate before every connection.
 func writeHostBlock(m Machine) error {
-	out, err := hangar("ssh-config", m.ID)
+	out, err := instabox("ssh-config", m.ID)
 	if err != nil {
 		return err
 	}
@@ -102,9 +102,9 @@ func writeHostBlock(m Machine) error {
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# hangar machine %s (%s), managed by herdr-hangar\n", m.Name, m.ID)
+	fmt.Fprintf(&b, "# instabox machine %s (%s), managed by herdr-instabox\n", m.Name, m.ID)
 	fmt.Fprintf(&b, "Match host %s exec \"%s ensure-cert %s %s\"\n",
-		m.Target(), shellQuote(self), m.ID, shellQuote(hangarBin()))
+		m.Target(), shellQuote(self), m.ID, shellQuote(instaboxBin()))
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
@@ -137,14 +137,22 @@ func shellQuote(s string) string {
 // ensureCert runs from ssh's Match exec before each connection. It refreshes the
 // certificate only near expiry and always succeeds: a failed refresh surfaces as
 // an SSH authentication error, which herdr already reports.
-func ensureCert(id, hangarPath string) {
-	home, _ := os.UserHomeDir()
-	cert := filepath.Join(home, ".config", "hangar", "ssh", id+"-cert.pub")
+func ensureCert(id, instaboxPath string) {
+	cert := filepath.Join(instaboxConfigDir(), "ssh", id+"-cert.pub")
 	if until, ok := certValidUntil(cert); ok && time.Until(until) > certMargin {
 		return
 	}
-	cmd := exec.Command(hangarPath, "ssh-cert", id)
+	cmd := exec.Command(instaboxPath, "ssh-cert", id)
 	_ = cmd.Run()
+}
+
+// instaboxConfigDir is where the instabox CLI keeps its sign-in and certificates.
+func instaboxConfigDir() string {
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, "instabox")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "instabox")
 }
 
 func certValidUntil(path string) (time.Time, bool) {
